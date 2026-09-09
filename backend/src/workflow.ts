@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { canAccessStore, canMutateVisit, type Message, type User, type Visit, validateDraft } from "./domain.js";
 import type { DataRepository } from "./store.js";
-import { buildFactualDraft } from "./reporting.js";
+import { buildFactualDraft, isCorrectionInstruction } from "./reporting.js";
+import { isProcedureQuestion } from "./procedures.js";
 
 export interface UnipileMessageReceivedEvent {
   event: "message_received" | "message.new";
@@ -25,7 +26,10 @@ export interface ConversationOutcome {
 }
 
 export class VisitWorkflow {
-  constructor(private readonly db: DataRepository) {}
+  constructor(
+    private readonly db: DataRepository,
+    private readonly answerProcedureQuestion: (question: string) => Promise<string> = async () => "Procedure retrieval is not configured yet."
+  ) {}
 
   async ingestUnipileEvent(event: UnipileMessageReceivedEvent, actorId: string) {
     if (event.is_sender) return { ignored: true, reason: "OUTGOING_MESSAGE" } as const;
@@ -73,7 +77,13 @@ export class VisitWorkflow {
 
     const message: Message = {
       id: randomUUID(), providerKey: input.providerKey, actorId: user.id, visitId: visit?.id,
-      kind: /prepare|draft/i.test(input.text) ? "text" : /validate|approve/i.test(input.text) ? "validation" : "text",
+      kind: isCorrectionInstruction(input.text)
+        ? "correction"
+        : isProcedureQuestion(input.text)
+          ? "procedural_question"
+          : /validate|approve/i.test(input.text)
+          ? "validation"
+          : "text",
       text: input.text, processingStatus: "accepted", receivedAt: input.receivedAt ?? new Date().toISOString()
     };
     await this.db.insertMessage(message);
@@ -87,6 +97,7 @@ export class VisitWorkflow {
       const visit = ingested.visit;
       const user = await this.db.getUser(input.actorId);
       const normalized = input.text.toLowerCase();
+      if (isProcedureQuestion(input.text)) return { visit, reply: await this.answerProcedureQuestion(input.text) };
       if (!visit) return { reply: "Which authorised store are you visiting? Please choose Lyon or Nantes.", visit };
       if (/\b(cancel|abandon)\b/.test(normalized)) {
         visit.state = "cancelled";
@@ -104,7 +115,13 @@ export class VisitWorkflow {
       }
       if (visit.state === "ready_for_review") {
         const updated = await this.prepareCurrentDraft(user, visit.id);
-        return { visit: updated, reply: `I updated the visit with your new information. ${this.formatDraft(updated)}` };
+        const correction = isCorrectionInstruction(input.text);
+        return {
+          visit: updated,
+          reply: correction
+            ? `Correction applied. I created revised draft ${updated.draft?.version}. ${this.formatDraft(updated)}`
+            : `I updated the visit with your new information. ${this.formatDraft(updated)}`
+        };
       }
       return { visit, reply: "Recorded. Send another observation, ask a procedure question, or say ‘prepare the report’." };
     } catch (error) {
@@ -127,8 +144,14 @@ export class VisitWorkflow {
   }
 
   async completeAudioMessage(message: Message, transcript: string, audioPath: string): Promise<ConversationOutcome> {
+    const kind = isProcedureQuestion(transcript)
+      ? "procedural_question"
+      : isCorrectionInstruction(transcript)
+        ? "correction"
+        : message.kind;
     const completed: Message = {
       ...message,
+      kind,
       audioPath,
       transcript: transcript.trim(),
       processingStatus: "completed",
@@ -136,11 +159,18 @@ export class VisitWorkflow {
     };
     await this.db.updateMessage(completed);
     const visit = completed.visitId ? await this.db.getVisit(completed.visitId) : undefined;
+    if (kind === "procedural_question") return { visit, reply: await this.answerProcedureQuestion(completed.transcript ?? transcript) };
     if (!visit) return { reply: `Transcript: “${completed.transcript}”\nStart a visit before sending observations.` };
     if (visit.state === "ready_for_review") {
       const user = await this.db.getUser(completed.actorId);
       const updated = await this.prepareCurrentDraft(user, visit.id);
-      return { visit: updated, reply: `Voice note transcribed: “${completed.transcript}”\nI created draft ${updated.draft?.version} because the previous draft is now stale.` };
+      const correction = kind === "correction";
+      return {
+        visit: updated,
+        reply: correction
+          ? `Voice correction applied. I created revised draft ${updated.draft?.version}. ${this.formatDraft(updated)}`
+          : `Voice note transcribed: “${completed.transcript}”\nI created draft ${updated.draft?.version} because the previous draft is now stale.`
+      };
     }
     return { visit, reply: `Voice note transcribed and recorded: “${completed.transcript}”` };
   }

@@ -68,6 +68,34 @@ test("does not include standalone visit commands in a draft", async () => {
   assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance is tidy."]);
 });
 
+test("applies a quantity correction and preserves the audit trail in a revised draft", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "provider-correction-start", actorId: user.id, text: "Start a visit to Lyon." });
+  const original = await workflow.ingestText({ providerKey: "provider-correction-observation", actorId: user.id, text: "Fifteen boxes are outside storage." });
+  const firstDraft = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.equal(firstDraft.draft?.version, 1);
+
+  const corrected = await workflow.handleIncomingText({ providerKey: "provider-correction-change", actorId: user.id, text: "Change fifteen boxes to five." });
+  assert.equal(corrected.visit?.draft?.version, 2);
+  assert.deepEqual(corrected.visit?.draft?.findings.map((finding) => finding.text), ["five boxes are outside storage."]);
+  assert.deepEqual(corrected.visit?.draft?.findings[0]?.sourceMessageIds, [original.message.id, db.messages[2]!.id]);
+  assert.match(corrected.reply ?? "", /Correction applied/i);
+});
+
+test("answers a procedure question without adding it as a visit finding", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db, async () => "Record the observed equipment symptom.\n\nSources:\n• SOP-03: Information to collect");
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "provider-procedure-start", actorId: user.id, text: "Start a visit to Lyon." });
+  const outcome = await workflow.handleIncomingText({ providerKey: "provider-procedure-question", actorId: user.id, text: "What should I record for an equipment incident?" });
+  assert.match(outcome.reply ?? "", /SOP-03/);
+  assert.equal(db.messages.at(-1)?.kind, "procedural_question");
+  const draft = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.equal(draft.draft?.findings.length, 0);
+});
+
 test("completes a voice note and uses its transcript as a factual observation", async () => {
   const db = new MemoryStore();
   const workflow = new VisitWorkflow(db);

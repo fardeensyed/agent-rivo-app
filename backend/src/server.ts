@@ -6,14 +6,23 @@ import { VisitWorkflow, type UnipileMessageReceivedEvent } from "./workflow.js";
 import { config } from "./config.js";
 import { SupabaseStore } from "./supabase-store.js";
 import { createPrivateVoiceNoteUrl, createSupabaseAdmin, downloadUnipileAttachment, sendUnipileText, storePrivateVoiceNote, transcribeAudio } from "./integrations.js";
+import { ProcedureAssistant } from "./procedures.js";
 
 const app = express();
-const db = config.hasSupabase ? new SupabaseStore(createSupabaseAdmin()!) : new MemoryStore();
-const workflow = new VisitWorkflow(db);
+const supabaseAdmin = createSupabaseAdmin();
+const db = supabaseAdmin ? new SupabaseStore(supabaseAdmin) : new MemoryStore();
+const procedureAssistant = supabaseAdmin ? new ProcedureAssistant(supabaseAdmin) : undefined;
+const workflow = new VisitWorkflow(db, (question) => procedureAssistant?.answer(question) ?? Promise.resolve("Procedure retrieval is not configured yet."));
 app.use(cors());
 app.use(express.json());
 
 const actor = (request: express.Request) => db.getUser(String(request.header("x-demo-user") || "user_anika"));
+
+async function replyIfPossible(chatId: string | undefined, text: string): Promise<void> {
+  if (!chatId) return;
+  try { await sendUnipileText(chatId, text); }
+  catch (replyError) { console.error("UNIPILE_FALLBACK_REPLY_FAILED", replyError instanceof Error ? replyError.message : "UNKNOWN"); }
+}
 
 app.get("/health", (_request, response) => response.json({ ok: true, service: "agent-rivo-backend" }));
 
@@ -80,13 +89,17 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
       }
     }
     const outcome = await workflow.handleIncomingText({ providerKey: `${event.account_id}:${providerMessageId}`, actorId: config.unipileActorId, text: event.message ?? "", receivedAt: event.timestamp });
-    if (event.chat_id && outcome.reply) {
-      try { await sendUnipileText(event.chat_id, outcome.reply); }
-      catch (replyError) { console.error(replyError instanceof Error ? replyError.message : "UNIPILE_REPLY_FAILED"); }
-    }
+    if (event.chat_id && outcome.reply) await replyIfPossible(event.chat_id, outcome.reply);
     return response.status(202).json(outcome);
   }
-  catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : "INGEST_FAILED" }); }
+  catch (error) {
+    console.error("WEBHOOK_PROCESSING_FAILED", error instanceof Error ? error.message : "UNKNOWN");
+    if (unipileEvent.success) {
+      await replyIfPossible(unipileEvent.data.chat_id, "I could not complete that request right now. Please try again in a moment. Your previous visit notes were preserved.");
+      return response.status(202).json({ accepted: true, processing: "failed" });
+    }
+    return response.status(400).json({ error: error instanceof Error ? error.message : "INGEST_FAILED" });
+  }
 });
 
 app.get("/api/messages/:messageId/audio-url", async (request, response) => {
