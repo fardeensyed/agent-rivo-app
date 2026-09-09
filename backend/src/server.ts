@@ -32,9 +32,30 @@ app.get("/api/stores", async (request, response) => {
   response.json(stores.filter((store) => user.storeIds.includes(store.id)));
 });
 
+app.get("/api/me", async (request, response) => {
+  try { return response.json(await actor(request)); }
+  catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : "USER_READ_FAILED" }); }
+});
+
 app.get("/api/visits", async (request, response) => {
-  const user = await actor(request);
-  response.json(await db.getVisibleVisits(user));
+  try {
+    const user = await actor(request);
+    return response.json(await db.getVisibleVisits(user));
+  } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : "VISIT_READ_FAILED" }); }
+});
+
+app.get("/api/visits/:visitId", async (request, response) => {
+  try {
+    const user = await actor(request);
+    const visit = await db.getVisit(request.params.visitId);
+    if (!visit) return response.status(404).json({ error: "VISIT_NOT_FOUND" });
+    if (!user.storeIds.includes(visit.storeId)) return response.status(403).json({ error: "FORBIDDEN" });
+    const stores = await db.getStores();
+    const store = stores.find((item) => item.id === visit.storeId);
+    if (!store) return response.status(404).json({ error: "STORE_NOT_FOUND" });
+    const author = await db.getUser(visit.authorId);
+    return response.json({ visit, store, author: { id: author.id, displayName: author.displayName }, messages: await db.getVisitMessages(visit.id) });
+  } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : "VISIT_DETAIL_FAILED" }); }
 });
 
 app.post("/api/webhooks/whatsapp", async (request, response) => {
