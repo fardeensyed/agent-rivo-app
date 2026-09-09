@@ -9,12 +9,12 @@ Agent Rivo is a TypeScript MVP for the field-visit reporting assessment. It turn
 - Store/user scope checks.
 - Draft versioning and explicit validation guards.
 - Local development adapter so the core workflow can be tested before Supabase/Unipile credentials are configured.
+- Real Unipile voice-note download, private Supabase Storage, Groq transcription and persisted processing status.
 
 ## Planned integrations
 
-- Supabase Auth, Postgres, RLS, Storage and pgvector.
-- Groq speech-to-text and chat completion.
-- Unipile WhatsApp webhooks and replies.
+- Supabase Auth and pgvector procedure retrieval.
+- Groq report structuring and procedure answers.
 - React dashboard.
 
 ## Development

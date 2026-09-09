@@ -1,5 +1,10 @@
-import "dotenv/config";
+import { config as loadEnv } from "dotenv";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { z } from "zod";
+
+const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+loadEnv({ path: path.resolve(moduleDirectory, "../../.env") });
 
 export const config = z.object({
   port: z.coerce.number().default(3001),
@@ -9,6 +14,8 @@ export const config = z.object({
   groqApiKey: z.string().optional(),
   groqChatModel: z.string().default("llama-3.3-70b-versatile"),
   groqSttModel: z.string().default("whisper-large-v3-turbo"),
+  unipileDsn: z.string().optional(),
+  unipileApiKey: z.string().optional(),
   unipileAccountId: z.string().optional(),
   unipileSenderId: z.string().optional(),
   unipileActorId: z.string().default("user_anika"),
@@ -25,6 +32,8 @@ export const config = z.object({
   groqApiKey: process.env.GROQ_API_KEY,
   groqChatModel: process.env.GROQ_CHAT_MODEL,
   groqSttModel: process.env.GROQ_STT_MODEL,
+  unipileDsn: process.env.UNIPILE_DSN,
+  unipileApiKey: process.env.UNIPILE_API_KEY,
   unipileAccountId: process.env.UNIPILE_ACCOUNT_ID,
   unipileSenderId: process.env.UNIPILE_SENDER_ID,
   unipileActorId: process.env.UNIPILE_ACTOR_ID,

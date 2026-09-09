@@ -26,6 +26,7 @@ export interface Message {
   audioPath?: string;
   transcript?: string;
   processingStatus: ProcessingStatus;
+  processingError?: string;
   receivedAt: string;
 }
 

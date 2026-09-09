@@ -28,7 +28,7 @@ create table public.user_store_memberships (
 );
 
 create table public.visits (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   store_id text not null references public.stores(id),
   author_id text not null references public.app_users(id),
   state public.visit_state not null default 'collecting',
@@ -42,10 +42,10 @@ create unique index one_active_visit_per_user on public.visits(author_id)
 where state in ('collecting', 'ready_for_review');
 
 create table public.messages (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   provider_account_id text not null,
   provider_message_id text not null,
-  visit_id uuid references public.visits(id),
+  visit_id text references public.visits(id),
   actor_id text not null references public.app_users(id),
   kind public.message_kind not null,
   text_content text,
@@ -59,25 +59,25 @@ create table public.messages (
 
 create table public.report_drafts (
   id uuid primary key default gen_random_uuid(),
-  visit_id uuid not null references public.visits(id) on delete cascade,
+  visit_id text not null references public.visits(id) on delete cascade,
   version integer not null,
   title text not null,
   summary text not null,
   report_json jsonb not null,
-  source_message_ids uuid[] not null default '{}',
+  source_message_ids text[] not null default '{}',
   created_at timestamptz not null default now(),
   unique (visit_id, version)
 );
 
 create table public.validated_reports (
   id uuid primary key default gen_random_uuid(),
-  visit_id uuid not null unique references public.visits(id),
+  visit_id text not null unique references public.visits(id),
   draft_id uuid not null references public.report_drafts(id),
   version integer not null,
   report_json jsonb not null,
   validated_by text not null references public.app_users(id),
   validated_at timestamptz not null default now(),
-  validation_message_id uuid references public.messages(id)
+  validation_message_id text references public.messages(id)
 );
 
 create table public.procedure_chunks (
