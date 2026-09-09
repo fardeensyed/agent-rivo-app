@@ -3,14 +3,20 @@ import type { Finding, Message, ReportDraft, Store, Visit } from "./domain.js";
 type Observation = { text: string; sourceMessageIds: string[] };
 
 export function isCorrectionInstruction(text: string): boolean {
-  return /^(?:change|correct|replace)\b/i.test(text.trim());
+  const value = text.trim();
+  return /^(?:change|correct|replace)\b/i.test(value)
+    || /\bplease\s+(?:change|correct|replace|remove)\b/i.test(value)
+    || /\bremove\s+(?:it|that|this)\b/i.test(value)
+    || /\bcorrection to (?:my )?previous note\b/i.test(value)
+    || /\bi said\b.*\bnot\b/i.test(value)
+    || /\bplease use\b.*\bnot\b/i.test(value);
 }
 
 function observationSentences(message: Message): string[] {
   const text = message.transcript ?? message.text ?? "";
-  return text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter((sentence) => {
+  return text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).map((sentence) => sentence.replace(/^(?:i am |i'm )?(?:start(?:ing)?|begin(?:ning)?)\s+(?:a )?visit(?:\s+to\s+[^.!?]+)?\s*[,;:-]?\s*/i, "")).filter((sentence) => {
     const lower = sentence.toLowerCase();
-    const isCommand = /^(start|begin).*(visit)|^(prepare|show|finish|end).*(report|draft|visit)|^(finish|end|done)\.?$|^(i )?(validate|approve)|^(change|remove|replace|correct)\b/.test(lower);
+    const isCommand = /^(?:start|starting|begin|beginning).*(visit)|^(prepare|show|finish|end).*(report|draft|visit)|^(finish|end|done)\.?$|^(i )?(validate|approve)|^(change|remove|replace|correct)\b/.test(lower);
     return sentence.length > 2 && !isCommand;
   });
 }
@@ -26,15 +32,16 @@ function escapePattern(value: string): string {
  */
 function applyCorrection(observations: Observation[], message: Message): void {
   const text = (message.transcript ?? message.text ?? "").trim();
-  const match = /^(?:change|correct|replace)\s+(.+?)\s+(?:to|with)\s+(.+?)[.!?]?$/i.exec(text);
-  if (!match) return;
+  const directMatch = /^(?:change|correct|replace)\s+(.+?)\s+(?:to|with)\s+(.+?)[.!?]?$/i.exec(text);
+  const spokenQuantityMatch = /(?:there\s+(?:are|is)\s+)?(?<replacement>\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?<unit>boxes?|items?|units?|pieces?)[^.!?]*?,\s*not\s+(?<previous>\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/i.exec(text);
+  if (!directMatch && !spokenQuantityMatch) return;
 
-  const previous = match[1].trim();
-  let replacement = match[2].trim();
+  const previous = spokenQuantityMatch?.groups?.previous?.trim() ?? directMatch![1].trim();
+  let replacement = spokenQuantityMatch?.groups?.replacement?.trim() ?? directMatch![2].trim();
   // Users naturally say "change fifteen boxes to five". Keep the unit so
   // the revised finding remains understandable on its own.
-  const unit = /\b(box(?:es)?|item(?:s)?|unit(?:s)?|piece(?:s)?)$/i.exec(previous)?.[1];
-  if (unit && /^\d+(?:\.\d+)?$|^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)$/i.test(replacement)) {
+  const unit = spokenQuantityMatch?.groups?.unit ?? /\b(box(?:es)?|item(?:s)?|unit(?:s)?|piece(?:s)?)$/i.exec(previous)?.[1];
+  if (!spokenQuantityMatch && unit && /^\d+(?:\.\d+)?$|^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)$/i.test(replacement)) {
     replacement = `${replacement} ${unit}`;
   }
 

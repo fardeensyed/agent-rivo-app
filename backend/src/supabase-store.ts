@@ -15,6 +15,12 @@ export class SupabaseStore implements DataRepository {
     return { id: String(data.id), displayName: String(data.display_name), role: "regional_manager", storeIds: (memberships ?? []).map((row) => String(row.store_id)) };
   }
 
+  async getUserByAuthId(authUserId: string): Promise<User> {
+    const { data, error } = await this.client.from("app_users").select("id").eq("auth_user_id", authUserId).maybeSingle();
+    if (error || !data) throw new Error("AUTH_USER_NOT_MAPPED");
+    return this.getUser(String(data.id));
+  }
+
   async getStores(): Promise<Store[]> {
     const { data, error } = await this.client.from("stores").select("id,name,city,timezone");
     if (error) throw new Error(`STORE_READ_FAILED:${error.message}`);
@@ -35,6 +41,12 @@ export class SupabaseStore implements DataRepository {
 
   async getVisitMessages(visitId: string): Promise<Message[]> {
     const { data, error } = await this.client.from("messages").select("*").eq("visit_id", visitId).order("received_at", { ascending: true });
+    if (error) throw new Error(`MESSAGE_READ_FAILED:${error.message}`);
+    return (data ?? []).map((row) => this.toMessage(row as Row));
+  }
+
+  async getUnassignedMessagesForUser(userId: string): Promise<Message[]> {
+    const { data, error } = await this.client.from("messages").select("*").eq("actor_id", userId).is("visit_id", null).order("received_at", { ascending: true });
     if (error) throw new Error(`MESSAGE_READ_FAILED:${error.message}`);
     return (data ?? []).map((row) => this.toMessage(row as Row));
   }

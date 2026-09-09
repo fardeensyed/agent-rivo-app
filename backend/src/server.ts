@@ -16,7 +16,17 @@ const workflow = new VisitWorkflow(db, (question) => procedureAssistant?.answer(
 app.use(cors());
 app.use(express.json());
 
-const actor = (request: express.Request) => db.getUser(String(request.header("x-demo-user") || "user_anika"));
+async function actor(request: express.Request) {
+  const authorization = request.header("authorization");
+  const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
+  if (token && supabaseAdmin) {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data.user) throw new Error("UNAUTHENTICATED");
+    return db.getUserByAuthId(data.user.id);
+  }
+  if (config.enableLocalTestRunner) return db.getUser(String(request.header("x-demo-user") || "user_anika"));
+  throw new Error("UNAUTHENTICATED");
+}
 
 async function replyIfPossible(chatId: string | undefined, text: string): Promise<void> {
   if (!chatId) return;
@@ -27,9 +37,14 @@ async function replyIfPossible(chatId: string | undefined, text: string): Promis
 app.get("/health", (_request, response) => response.json({ ok: true, service: "agent-rivo-backend" }));
 
 app.get("/api/stores", async (request, response) => {
-  const user = await actor(request);
-  const stores = await db.getStores();
-  response.json(stores.filter((store) => user.storeIds.includes(store.id)));
+  try {
+    const user = await actor(request);
+    const stores = await db.getStores();
+    return response.json(stores.filter((store) => user.storeIds.includes(store.id)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "STORE_READ_FAILED";
+    return response.status(message === "UNAUTHENTICATED" || message === "AUTH_USER_NOT_MAPPED" ? 401 : 400).json({ error: message });
+  }
 });
 
 app.get("/api/me", async (request, response) => {

@@ -112,3 +112,72 @@ test("completes a voice note and uses its transcript as a factual observation", 
   assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The delivery area is clean."]);
   assert.equal(db.messages[1]?.processingStatus, "completed");
 });
+
+test("starts a visit from a voice transcript and keeps every spoken observation", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const pending = await workflow.ingestUnipileEvent({
+    event: "message_received", account_id: "account-1", account_type: "WHATSAPP", message_id: "voice-start-message",
+    provider_message_id: "voice-start-provider", attachments: [{ id: "voice-start-attachment", type: "audio" }]
+  }, "user_anika");
+  if (!("message" in pending)) return;
+  const completed = await workflow.completeAudioMessage(pending.message, "I am starting a visit to Nantes. Two promotional labels are missing. One team member is absent today.", "store_nantes/voice.ogg");
+  assert.equal(completed.visit?.storeId, "store_nantes");
+  const user = await db.getUser("user_anika");
+  const drafted = await workflow.prepareCurrentDraft(user, completed.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["Two promotional labels are missing.", "One team member is absent today."]);
+});
+
+test("applies a natural spoken quantity correction", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "spoken-correction-start", actorId: user.id, text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "spoken-correction-original", actorId: user.id, text: "Fifteen boxes are outside the storage area." });
+  await workflow.ingestText({ providerKey: "spoken-correction-change", actorId: user.id, text: "Correction to my previous note. There are five boxes outside the storage area, not fifteen. Please use five in the report." });
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["five boxes are outside the storage area."]);
+  assert.equal(drafted.draft?.findings[0]?.sourceMessageIds.length, 2);
+});
+
+test("does not attach another store's notes to an active visit", async () => {
+  const workflow = new VisitWorkflow(new MemoryStore());
+  await workflow.ingestText({ providerKey: "switch-start", actorId: "user_anika", text: "Start a visit to Lyon." });
+  await assert.rejects(() => workflow.ingestText({ providerKey: "switch-other-store", actorId: "user_anika", text: "Now I am at Nantes. The entrance is tidy." }), /ACTIVE_VISIT_REQUIRES_FINISH_OR_CANCEL/);
+});
+
+test("keeps an observation sent before store selection and attaches it after an explicit visit start", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  await workflow.handleIncomingText({ providerKey: "pending-store-note", actorId: "user_anika", text: "The entrance is tidy." });
+  assert.equal(db.messages[0]?.visitId, undefined);
+  const started = await workflow.ingestText({ providerKey: "pending-store-start", actorId: "user_anika", text: "Start a visit to Lyon." });
+  const user = await db.getUser("user_anika");
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance is tidy."]);
+});
+
+test("does not prepare a report while a visit voice note is still transcribing", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const started = await workflow.ingestText({ providerKey: "pending-audio-start", actorId: "user_anika", text: "Start a visit to Lyon." });
+  await workflow.ingestUnipileEvent({
+    event: "message_received", account_id: "account-1", account_type: "WHATSAPP", message_id: "pending-audio-message",
+    provider_message_id: "pending-audio-provider", attachments: [{ id: "pending-audio-attachment", type: "audio" }]
+  }, "user_anika");
+  const outcome = await workflow.handleIncomingText({ providerKey: "pending-audio-prepare", actorId: "user_anika", text: "Prepare the report." });
+  assert.match(outcome.reply ?? "", /still transcribing/i);
+  assert.equal((await db.getActiveVisit("user_anika"))?.draft, undefined);
+});
+
+test("asks for clarification instead of claiming an ambiguous correction was applied", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const started = await workflow.ingestText({ providerKey: "ambiguous-start", actorId: "user_anika", text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "ambiguous-note", actorId: "user_anika", text: "The entrance is tidy." });
+  const user = await db.getUser("user_anika");
+  await workflow.prepareCurrentDraft(user, started.visit!.id);
+  const result = await workflow.handleIncomingText({ providerKey: "ambiguous-remove", actorId: "user_anika", text: "Please remove it." });
+  assert.match(result.reply ?? "", /which observation/i);
+  assert.equal(result.visit?.draft?.version, 1);
+});

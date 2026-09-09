@@ -21,7 +21,8 @@ export const config = z.object({
   unipileAccountId: z.string().optional(),
   unipileSenderId: z.string().optional(),
   unipileActorId: z.string().default("user_anika"),
-  unipileWebhookSecret: z.string().optional()
+  unipileWebhookSecret: z.string().optional(),
+  enableLocalTestRunner: z.enum(["true", "false"]).default("false").transform((value) => value === "true")
 }).transform((env) => ({
   ...env,
   hasSupabase: Boolean(env.supabaseUrl && env.supabaseSecretKey),
@@ -40,5 +41,6 @@ export const config = z.object({
   unipileAccountId: process.env.UNIPILE_ACCOUNT_ID,
   unipileSenderId: process.env.UNIPILE_SENDER_ID,
   unipileActorId: process.env.UNIPILE_ACTOR_ID,
-  unipileWebhookSecret: process.env.UNIPILE_WEBHOOK_SECRET
+  unipileWebhookSecret: process.env.UNIPILE_WEBHOOK_SECRET,
+  enableLocalTestRunner: process.env.ENABLE_LOCAL_TEST_RUNNER
 });

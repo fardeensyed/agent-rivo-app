@@ -2,10 +2,12 @@ import type { Message, Store, User, Visit } from "./domain.js";
 
 export interface DataRepository {
   getUser(id: string): Promise<User>;
+  getUserByAuthId(authUserId: string): Promise<User>;
   getStores(): Promise<Store[]>;
   getVisibleVisits(user: User): Promise<Visit[]>;
   getVisit(id: string): Promise<Visit | undefined>;
   getVisitMessages(visitId: string): Promise<Message[]>;
+  getUnassignedMessagesForUser(userId: string): Promise<Message[]>;
   getActiveVisit(userId: string): Promise<Visit | undefined>;
   getMessageByProviderKey(providerKey: string): Promise<Message | undefined>;
   getMessage(id: string): Promise<Message | undefined>;
@@ -34,6 +36,11 @@ export class MemoryStore implements DataRepository {
     return user;
   }
 
+  async getUserByAuthId(authUserId: string): Promise<User> {
+    // The in-memory adapter is only used by the local test runner.
+    return this.getUser(authUserId.replace(/^auth_/, ""));
+  }
+
   async getStores(): Promise<Store[]> {
     return this.stores;
   }
@@ -48,6 +55,10 @@ export class MemoryStore implements DataRepository {
 
   async getVisitMessages(visitId: string): Promise<Message[]> {
     return this.messages.filter((message) => message.visitId === visitId).sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
+  }
+
+  async getUnassignedMessagesForUser(userId: string): Promise<Message[]> {
+    return this.messages.filter((message) => message.actorId === userId && !message.visitId).sort((left, right) => left.receivedAt.localeCompare(right.receivedAt));
   }
 
   async getActiveVisit(userId: string): Promise<Visit | undefined> {
