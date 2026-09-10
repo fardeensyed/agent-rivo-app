@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { SupabaseStore } from "./supabase-store.js";
 import { createPrivateVoiceNoteUrl, createSupabaseAdmin, downloadUnipileAttachment, requireAudibleAudio, sendUnipileText, storePrivateVoiceNote, transcribeAudio } from "./integrations.js";
 import { ProcedureAssistant } from "./procedures.js";
+import { WebhookSignatureError, verifyUnipileAuthHeader, verifyUnipileSignature } from "./webhook-auth.js";
 
 const app = express();
 const supabaseAdmin = createSupabaseAdmin();
@@ -14,7 +15,13 @@ const db = supabaseAdmin ? new SupabaseStore(supabaseAdmin) : new MemoryStore();
 const procedureAssistant = supabaseAdmin ? new ProcedureAssistant(supabaseAdmin) : undefined;
 const workflow = new VisitWorkflow(db, (question) => procedureAssistant?.answer(question) ?? Promise.resolve("Procedure retrieval is not configured yet."));
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify: (request, _response, body) => {
+    if (request.url?.split("?")[0] === "/api/webhooks/whatsapp") {
+      (request as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(body);
+    }
+  }
+}));
 
 async function actor(request: express.Request) {
   const authorization = request.header("authorization");
@@ -85,6 +92,28 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
     is_sender: z.boolean().optional()
   }).safeParse(request.body);
   if (!testEvent.success && !unipileEvent.success) return response.status(400).json({ error: "INVALID_EVENT" });
+  // Synthetic local test events intentionally bypass provider authentication.
+  // Every real Unipile event must carry valid provider authentication.
+  if (unipileEvent.success && !testEvent.success) {
+    try {
+      const rawBody = (request as express.Request & { rawBody?: Buffer }).rawBody;
+      if (!rawBody) throw new WebhookSignatureError("UNIPILE_SIGNATURE_INVALID");
+      const staticAuth = request.header("unipile-auth") ?? undefined;
+      if (staticAuth) {
+        verifyUnipileAuthHeader({ authHeader: staticAuth, secret: config.unipileWebhookSecret });
+      } else {
+        verifyUnipileSignature({
+          signatureHeader: request.header("unipile-signature") ?? undefined,
+          rawBody,
+          secret: config.unipileWebhookSecret
+        });
+      }
+    } catch (error) {
+      const code = error instanceof WebhookSignatureError ? error.code : "UNIPILE_SIGNATURE_INVALID";
+      console.warn("UNIPILE_WEBHOOK_SIGNATURE_REJECTED", code);
+      return response.status(code === "UNIPILE_WEBHOOK_SECRET_NOT_CONFIGURED" ? 503 : 401).json({ error: code });
+    }
+  }
   try {
     if (testEvent.success) return response.status(202).json(await workflow.handleIncomingText(testEvent.data));
     if (!unipileEvent.success) return response.status(400).json({ error: "INVALID_EVENT" });

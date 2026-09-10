@@ -4,6 +4,40 @@ import { audioAppearsSilent, requireReliableTranscript } from "../src/integratio
 import { MemoryStore } from "../src/store.js";
 import { VisitWorkflow } from "../src/workflow.js";
 import { isUnsupportedProcedureAnswer, selectRelevantProcedureChunks } from "../src/procedures.js";
+import { verifyUnipileAuthHeader, verifyUnipileSignature } from "../src/webhook-auth.js";
+import { createHmac } from "node:crypto";
+
+test("accepts only a current, correctly signed Unipile webhook", () => {
+  const rawBody = Buffer.from('{"event":"message_received"}');
+  const secret = "test-webhook-secret";
+  const timestamp = 1_700_000_000;
+  const signature = createHmac("sha256", secret).update(`${timestamp}.${rawBody.toString("utf8")}`).digest("hex");
+  assert.doesNotThrow(() => verifyUnipileSignature({
+    signatureHeader: `t=${timestamp},v0=${signature}`,
+    rawBody,
+    secret,
+    nowMs: timestamp * 1000
+  }));
+  assert.throws(() => verifyUnipileSignature({
+    signatureHeader: `t=${timestamp},v0=${"0".repeat(64)}`,
+    rawBody,
+    secret,
+    nowMs: timestamp * 1000
+  }), /UNIPILE_SIGNATURE_INVALID/);
+  assert.throws(() => verifyUnipileSignature({
+    signatureHeader: `t=${timestamp},v0=${signature}`,
+    rawBody,
+    secret,
+    nowMs: (timestamp + 301) * 1000
+  }), /UNIPILE_SIGNATURE_EXPIRED/);
+});
+
+test("accepts only the configured static Unipile webhook header", () => {
+  const secret = "test-webhook-secret";
+  assert.doesNotThrow(() => verifyUnipileAuthHeader({ authHeader: secret, secret }));
+  assert.throws(() => verifyUnipileAuthHeader({ authHeader: "wrong-secret", secret }), /UNIPILE_SIGNATURE_INVALID/);
+  assert.throws(() => verifyUnipileAuthHeader({ authHeader: undefined, secret }), /UNIPILE_SIGNATURE_MISSING/);
+});
 
 test("replaying a provider event has one effect", async () => {
   const db = new MemoryStore();

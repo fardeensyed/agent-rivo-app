@@ -95,6 +95,16 @@ Configure Unipile with:
 https://YOUR-NGROK-DOMAIN.ngrok-free.app/api/webhooks/whatsapp
 ```
 
+### Webhook authentication
+
+For live Unipile events, the backend verifies either Unipile's `unipile-signature` HMAC header or a static `Unipile-Auth` header against the shared secret. Add the same secret used by the webhook only to the root `.env` file:
+
+```env
+UNIPILE_WEBHOOK_SECRET=your_endpoint_secret
+```
+
+Restart the backend after adding it. The backend rejects missing, invalid, modified or older-than-five-minute webhook authentication values. Local test-runner events remain available for automated tests and do not require provider authentication.
+
 ngrok is not needed for dashboard-only testing. Send messages from the connected WhatsApp account.
 
 ## Verification
