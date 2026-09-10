@@ -221,6 +221,7 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 | Webhook returns 401 | UNIPILE_WEBHOOK_SECRET does not match the configured webhook header/signature | Set the same shared secret in Unipile and .env, then restart backend. |
 | Voice note fails | Silent, oversized, unsupported, inaccessible, or transcription service failure | Send a short audible note; the failed message remains visible and text notes are preserved. |
 | Dashboard is empty after WhatsApp update | Dashboard does not use realtime subscriptions | Click Refresh data; realtime refresh is intentionally optional. |
+| A store card says `Latest validated visit: —` or its button is disabled | The selected store/date filters exclude that store's latest validated visit | Click **Clear filters**, select the store, or set both dates to the visit's local date. For the seeded Nantes record, use `2026-09-04` to `2026-09-04`. |
 | RAG returns no answer | The question is outside approved SOP content, or the corpus was not indexed | Run npm run rag:ingest --workspace backend; otherwise the honest unsupported answer is expected. |
 | Direct visit/audio URL returns 403 | Current user does not own the unpublished visit or lacks store membership | This is expected access-control behaviour. |
 
