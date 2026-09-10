@@ -67,6 +67,20 @@ npm run rag:ingest --workspace backend
 
 The seed and RAG commands require `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. The secret key is server-only.
 
+### Development reset
+
+Use a dedicated Supabase development project only. The seed command is idempotent: it upserts the six supplied historical visits and reports, so rerunning it does not duplicate the fixture history. For a completely clean demo state, reset that dedicated project, re-run migrations `001`–`004`, then run the seed and RAG ingestion commands above. Do not use this process against production or unrelated data.
+
+## Models and controlled WhatsApp sender
+
+The default models are configured in `.env.example` and can be changed without editing application code:
+
+- Chat/RAG answer generation: `GROQ_CHAT_MODEL` (default `openai/gpt-oss-20b`).
+- Speech-to-text: `GROQ_STT_MODEL` (default `whisper-large-v3-turbo`).
+- Procedure embeddings: `EMBEDDING_MODEL` (default `Supabase/gte-small`).
+
+For the controlled live WhatsApp sender, set `UNIPILE_ACCOUNT_ID`, `UNIPILE_SENDER_ID` and `UNIPILE_ACTOR_ID=user_anika` in the server-only `.env`. The backend accepts messages only from that configured Unipile account and sender, then maps them to the seeded Anika user. Noah is provisioned through Supabase Auth for dashboard/access-control verification; an additional phone number is not required.
+
 ## Run the app
 
 From the repository root, use either:
