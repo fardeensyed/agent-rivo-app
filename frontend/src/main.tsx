@@ -12,7 +12,7 @@ type User = { id: string; displayName: string; storeIds: string[] };
 type Message = { id: string; kind: "text" | "audio" | "correction" | "procedural_question" | "validation"; text?: string; transcript?: string; audioPath?: string; processingStatus: string; processingError?: string; receivedAt: string };
 type VisitDetail = { visit: Visit; store: Store; author: { id: string; displayName: string }; messages: Message[] };
 type Page = "overview" | "stores" | "visits" | "reports";
-const API = "http://localhost:3001/api";
+const API = import.meta.env.VITE_API_URL ?? "http://localhost:3001/api";
 const label = (value: string) => value.replace(/_/g, " ");
 const dateTime = (value?: string) => value ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
 const dateOnly = (value?: string) => value ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" }).format(new Date(value)) : "—";

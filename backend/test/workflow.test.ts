@@ -62,6 +62,8 @@ test("recognises an FFmpeg near-silence measurement before transcription", () =>
   assert.equal(audioAppearsSilent("max_volume: -67.4 dB"), true);
   assert.equal(audioAppearsSilent("max_volume: -18.2 dB"), false);
   assert.equal(audioAppearsSilent("max_volume: -inf dB"), true);
+  assert.equal(audioAppearsSilent("mean_volume: -61.0 dB\nmax_volume: -9.2 dB"), true);
+  assert.equal(audioAppearsSilent("mean_volume: -26.0 dB\nmax_volume: -9.2 dB"), false);
 });
 
 test("does not cite low-similarity SOP chunks for unsupported questions", () => {
@@ -367,6 +369,29 @@ test("does not reopen a validated visit and persists that final state", async ()
   await workflow.validate(user, started.visit!.id, drafted.draft!.version);
   assert.equal((await db.getVisit(started.visit!.id))?.state, "validated");
   await assert.rejects(() => workflow.prepareCurrentDraft(user, started.visit!.id), /VISIT_FINAL/);
+});
+
+test("creates one immutable snapshot for the exact WhatsApp-approved draft", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  await workflow.handleIncomingText({ providerKey: "snapshot-start", actorId: "user_anika", text: "Start Lyon." });
+  await workflow.handleIncomingText({ providerKey: "snapshot-note", actorId: "user_anika", text: "The entrance is tidy." });
+  await workflow.handleIncomingText({ providerKey: "snapshot-draft", actorId: "user_anika", text: "Prepare the report." });
+  const approved = await workflow.handleIncomingText({ providerKey: "snapshot-approval", actorId: "user_anika", text: "I validate the latest draft." });
+  assert.equal(approved.visit?.state, "validated");
+  assert.equal(db.validatedReports.length, 1);
+  const snapshot = db.validatedReports[0];
+  assert.equal(snapshot.visitId, approved.visit?.id);
+  assert.equal(snapshot.version, 1);
+  assert.equal(snapshot.validationMessageId, db.messages.find((message) => message.providerKey === "snapshot-approval")?.id);
+  assert.equal(snapshot.report.findings[0]?.text, "The entrance is tidy.");
+
+  approved.visit!.draft!.findings[0]!.text = "Tampered after approval.";
+  assert.equal(snapshot.report.findings[0]?.text, "The entrance is tidy.");
+
+  const replay = await workflow.handleIncomingText({ providerKey: "snapshot-approval", actorId: "user_anika", text: "I validate the latest draft." });
+  assert.equal(replay.duplicate, true);
+  assert.equal(db.validatedReports.length, 1);
 });
 
 test("splits independent location facts so one clause can be removed safely", async () => {

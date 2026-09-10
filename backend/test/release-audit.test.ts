@@ -170,6 +170,49 @@ test("A07: Supabase persists audio procedure/correction classification", async (
   assert.equal(update.kind, "procedural_question");
 });
 
+test("A05: Supabase finalisation delegates the exact snapshot to the atomic RPC", async () => {
+  let rpcName = "";
+  let rpcArgs: Record<string, unknown> = {};
+  const client = {
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      rpcName = name;
+      rpcArgs = args;
+      return { error: null };
+    }
+  } as unknown as SupabaseClient;
+  const db = new SupabaseStore(client);
+  await db.finalizeValidation({
+    id: "audit-visit", storeId: "store_lyon", authorId: "user_anika", state: "validated",
+    startedAt: "2026-09-10T08:00:00Z", validatedAt: "2026-09-10T08:10:00Z", validatedBy: "user_anika",
+    draft: { version: 3, title: "Lyon report", summary: "Exact snapshot.", findings: [], followUpNotes: [], sourceMessageIds: [] }
+  }, "audit-validation-message");
+  assert.equal(rpcName, "finalize_visit_with_snapshot");
+  assert.deepEqual(rpcArgs, {
+    p_visit_id: "audit-visit",
+    p_version: 3,
+    p_validated_by: "user_anika",
+    p_validated_at: "2026-09-10T08:10:00Z",
+    p_validation_message_id: "audit-validation-message"
+  });
+});
+
+test("A05: Supabase reads the immutable validated snapshot instead of a mutable draft", async () => {
+  const snapshot = { version: 2, title: "Snapshot report", summary: "Approved facts.", findings: [], followUpNotes: [], sourceMessageIds: [] };
+  const visitRow = {
+    id: "audit-visit", store_id: "store_lyon", author_id: "user_anika", state: "validated",
+    started_at: "2026-09-10T08:00:00Z", validated_at: "2026-09-10T08:10:00Z", validated_by: "user_anika"
+  };
+  const client = {
+    from: (table: string) => {
+      if (table === "visits") return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: visitRow, error: null }) }) }) };
+      if (table === "validated_reports") return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { report_json: snapshot }, error: null }) }) }) };
+      throw new Error("Unexpected table read: " + table);
+    }
+  } as unknown as SupabaseClient;
+  const visit = await new SupabaseStore(client).getVisit("audit-visit");
+  assert.deepEqual(visit?.draft, snapshot);
+});
+
 test("P02: relative follow-up date resolves using the visit context", async () => {
   const { workflow, db } = fixture();
   const start = await workflow.ingestText({ providerKey: "audit:date-start", actorId: "user_anika", text: "Start a visit to Lyon.", receivedAt: "2026-09-07T10:00:00+02:00" });

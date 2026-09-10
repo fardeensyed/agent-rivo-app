@@ -90,6 +90,7 @@ UNIPILE_ACCOUNT_ID=YOUR_CONTROLLED_ACCOUNT_ID
 UNIPILE_SENDER_ID=YOUR_CONTROLLED_WHATSAPP_SENDER_ID
 UNIPILE_ACTOR_ID=user_anika
 UNIPILE_WEBHOOK_SECRET=YOUR_WEBHOOK_SHARED_SECRET
+APP_DASHBOARD_ORIGIN=http://localhost:5173
 ~~~
 
 The browser may receive only these public values:
@@ -97,6 +98,7 @@ The browser may receive only these public values:
 ~~~env
 VITE_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
+VITE_API_URL=http://localhost:3001/api
 VITE_ENABLE_DEMO_MODE=false
 ENABLE_LOCAL_TEST_RUNNER=false
 ~~~
@@ -111,8 +113,9 @@ In the Supabase SQL editor, run these migrations in order:
 2. supabase/migrations/002_private_voice_storage.sql
 3. supabase/migrations/003_procedure_chunk_upsert_and_version.sql
 4. supabase/migrations/004_harden_read_scopes.sql
+5. supabase/migrations/005_atomic_validated_report_snapshot.sql
 
-Migration 004 keeps drafts and message evidence private to their author until the visit is validated.
+Migration 004 keeps drafts and message evidence private to their author until the visit is validated. Migration 005 atomically validates the visit and writes an immutable validated report snapshot.
 
 ### 4. Seed fixture data and procedure corpus
 
@@ -201,7 +204,7 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 | A02 | Implemented | Real phone recording is downloaded, transcribed, stored privately, and playable. |
 | A03 | Implemented | Text and voice contribute to one report. |
 | A04 | Implemented | Revised draft retains original source inputs and correction trail. |
-| A05 | Partial | Current-version approval, stale-version rejection, and final-state guard work. The separate immutable `validated_reports` snapshot is not yet written for new live validations. |
+| A05 | Implemented | Current-version approval, stale-version rejection, final-state guard, and an immutable validated_reports snapshot are written atomically after migration 005 is applied. |
 | A06 | Implemented | Dashboard screens, real data, source timeline, report library, copy/print, and inclusive store/state/date/search filters work together. |
 | A07 | Implemented | Authorised users can inspect text, transcript, and private signed audio URL. |
 | A08 | Implemented | Procedure retrieval returns citations; unsupported questions return an honest no-answer response. |
@@ -227,8 +230,7 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 
 ## Known limitations
 
-- **A05 limitation — validated report snapshots:** validation makes the live visit read-only through the application workflow and saves validation metadata, but a new live validation does not yet populate the separate immutable `validated_reports` snapshot table. The dashboard currently reads the validated visit/draft state instead. This is a known partial requirement and should be implemented before treating the system as production-ready.
-- Silence protection combines audio-volume analysis and conservative transcript heuristics; it is not a full speech-activity model.
+- Voice protection combines peak/mean audio-volume analysis and conservative transcript heuristics; it is not a full speech-activity model with model confidence scores.
 - Corrections are deliberately conservative and request clarification for unusual or ambiguous wording.
 - Photos/OCR, PDF generation, realtime subscriptions, hosted deployment, and additional languages are optional and intentionally out of scope. Browser copy/print provides the required export capability.
 
@@ -237,4 +239,5 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 - .env and credential files are ignored by Git; .env.example contains placeholders only.
 - Secret keys stay server-side. The browser uses only the Supabase publishable key.
 - Private audio is delivered through short-lived signed URLs after server-side authorisation.
+- Real Unipile events fail closed if the webhook secret, account ID, or sender ID is not configured. Configure APP_DASHBOARD_ORIGIN and VITE_API_URL explicitly for any non-local deployment.
 - Use development accounts and fictional data only.

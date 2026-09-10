@@ -1,4 +1,14 @@
-import type { Message, Store, User, Visit } from "./domain.js";
+import type { Message, ReportDraft, Store, User, Visit } from "./domain.js";
+
+export interface ValidatedReportSnapshot {
+  visitId: string;
+  draftId: string;
+  version: number;
+  report: ReportDraft;
+  validatedBy: string;
+  validatedAt: string;
+  validationMessageId?: string;
+}
 
 export interface DataRepository {
   getUser(id: string): Promise<User>;
@@ -15,6 +25,7 @@ export interface DataRepository {
   insertMessage(message: Message): Promise<void>;
   updateMessage(message: Message): Promise<void>;
   saveVisit(visit: Visit): Promise<void>;
+  finalizeValidation(visit: Visit, validationMessageId?: string): Promise<void>;
 }
 
 export class MemoryStore implements DataRepository {
@@ -29,6 +40,7 @@ export class MemoryStore implements DataRepository {
   ];
   readonly visits: Visit[] = [];
   readonly messages: Message[] = [];
+  readonly validatedReports: ValidatedReportSnapshot[] = [];
 
   async getUser(id: string): Promise<User> {
     const user = this.users.find((item) => item.id === id);
@@ -84,5 +96,26 @@ export class MemoryStore implements DataRepository {
     const index = this.visits.findIndex((item) => item.id === visit.id);
     if (index < 0) throw new Error("VISIT_NOT_FOUND");
     this.visits[index] = visit;
+  }
+
+  async finalizeValidation(visit: Visit, validationMessageId?: string): Promise<void> {
+    if (!visit.draft || visit.state !== "validated" || !visit.validatedBy || !visit.validatedAt) throw new Error("DRAFT_NOT_READY");
+    const index = this.visits.findIndex((item) => item.id === visit.id);
+    if (index < 0) throw new Error("VISIT_NOT_FOUND");
+    const existing = this.validatedReports.find((report) => report.visitId === visit.id);
+    if (existing) {
+      if (existing.version === visit.draft.version && existing.validationMessageId === validationMessageId) return;
+      throw new Error("VISIT_FINAL");
+    }
+    this.visits[index] = structuredClone(visit);
+    this.validatedReports.push({
+      visitId: visit.id,
+      draftId: visit.id + ":draft:" + visit.draft.version,
+      version: visit.draft.version,
+      report: structuredClone(visit.draft),
+      validatedBy: visit.validatedBy,
+      validatedAt: visit.validatedAt,
+      validationMessageId
+    });
   }
 }

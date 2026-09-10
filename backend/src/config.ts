@@ -22,11 +22,13 @@ export const config = z.object({
   unipileSenderId: z.string().optional(),
   unipileActorId: z.string().default("user_anika"),
   unipileWebhookSecret: z.string().optional(),
+  dashboardOrigin: z.string().url().default("http://localhost:5173"),
   enableLocalTestRunner: z.enum(["true", "false"]).default("false").transform((value) => value === "true")
 }).transform((env) => ({
   ...env,
   hasSupabase: Boolean(env.supabaseUrl && env.supabaseSecretKey),
-  hasGroq: Boolean(env.groqApiKey)
+  hasGroq: Boolean(env.groqApiKey),
+  hasUnipileIdentity: Boolean(env.unipileAccountId && env.unipileSenderId)
 })).parse({
   port: process.env.PORT,
   supabaseUrl: process.env.SUPABASE_URL,
@@ -42,5 +44,6 @@ export const config = z.object({
   unipileSenderId: process.env.UNIPILE_SENDER_ID,
   unipileActorId: process.env.UNIPILE_ACTOR_ID,
   unipileWebhookSecret: process.env.UNIPILE_WEBHOOK_SECRET,
+  dashboardOrigin: process.env.APP_DASHBOARD_ORIGIN,
   enableLocalTestRunner: process.env.ENABLE_LOCAL_TEST_RUNNER
 });

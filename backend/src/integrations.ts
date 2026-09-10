@@ -37,14 +37,22 @@ export function requireReliableTranscript(value: string): string {
 }
 
 const SILENT_AUDIO_MAX_DB = -55;
+const SILENT_AUDIO_MAX_MEAN_DB = -50;
 
 export function audioAppearsSilent(ffmpegOutput: string): boolean {
-  const value = ffmpegOutput.match(/max_volume:\s*(-?(?:\d+(?:\.\d+)?|inf)) dB/i)?.[1];
-  if (!value) throw new Error("VOICE_AUDIO_ANALYSIS_FAILED");
-  if (value.toLowerCase() === "-inf") return true;
-  const maxVolume = Number(value);
+  const readVolume = (label: "max" | "mean") => ffmpegOutput.match(new RegExp(label + "_volume:\\s*(-?(?:\\d+(?:\\.\\d+)?|inf)) dB", "i"))?.[1];
+  const maximum = readVolume("max");
+  if (!maximum) throw new Error("VOICE_AUDIO_ANALYSIS_FAILED");
+  if (maximum.toLowerCase() === "-inf") return true;
+  const maxVolume = Number(maximum);
   if (!Number.isFinite(maxVolume)) throw new Error("VOICE_AUDIO_ANALYSIS_FAILED");
-  return maxVolume <= SILENT_AUDIO_MAX_DB;
+  const mean = readVolume("mean");
+  if (!mean) return maxVolume <= SILENT_AUDIO_MAX_DB;
+  if (mean.toLowerCase() === "-inf") return true;
+  const meanVolume = Number(mean);
+  if (!Number.isFinite(meanVolume)) throw new Error("VOICE_AUDIO_ANALYSIS_FAILED");
+  // A short click can have a high peak while the complete clip remains silent.
+  return maxVolume <= SILENT_AUDIO_MAX_DB || meanVolume <= SILENT_AUDIO_MAX_MEAN_DB;
 }
 
 export async function requireAudibleAudio(audio: Buffer): Promise<void> {

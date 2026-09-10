@@ -100,6 +100,7 @@ export class SupabaseStore implements DataRepository {
   }
 
   async saveVisit(visit: Visit): Promise<void> {
+    if (visit.state === "validated") throw new Error("VALIDATION_MUST_USE_SNAPSHOT");
     const { error } = await this.client.from("visits").update({ state: visit.state, validated_at: visit.validatedAt, validated_by: visit.validatedBy, latest_draft_version: visit.draft?.version ?? 0 }).eq("id", visit.id);
     if (error) throw new Error(`VISIT_UPDATE_FAILED:${error.message}`);
     if (visit.draft) {
@@ -109,9 +110,35 @@ export class SupabaseStore implements DataRepository {
     }
   }
 
+  async finalizeValidation(visit: Visit, validationMessageId?: string): Promise<void> {
+    if (!visit.draft || !visit.validatedAt || !visit.validatedBy) throw new Error("DRAFT_NOT_READY");
+    const { error } = await this.client.rpc("finalize_visit_with_snapshot", {
+      p_visit_id: visit.id,
+      p_version: visit.draft.version,
+      p_validated_by: visit.validatedBy,
+      p_validated_at: visit.validatedAt,
+      p_validation_message_id: validationMessageId ?? null
+    });
+    if (error) {
+      if (/STALE_DRAFT/i.test(error.message)) throw new Error("STALE_DRAFT");
+      if (/VISIT_FINAL/i.test(error.message)) throw new Error("VISIT_FINAL");
+      if (/DRAFT_NOT_READY/i.test(error.message)) throw new Error("DRAFT_NOT_READY");
+      throw new Error("VALIDATION_SNAPSHOT_FAILED:" + error.message);
+    }
+  }
+
   private async toVisit(row: Row): Promise<Visit> {
-    const { data: draftRow } = await this.client.from("report_drafts").select("*").eq("visit_id", String(row.id)).order("version", { ascending: false }).limit(1).maybeSingle();
-    const draft = draftRow?.report_json as ReportDraft | undefined;
+    const visitId = String(row.id);
+    const isValidated = row.state === "validated";
+    const { data: reportRow, error: reportError } = isValidated
+      ? await this.client.from("validated_reports").select("report_json").eq("visit_id", visitId).maybeSingle()
+      : { data: undefined, error: null };
+    if (reportError) throw new Error("VALIDATED_REPORT_READ_FAILED:" + reportError.message);
+    const { data: draftRow, error: draftError } = reportRow
+      ? { data: undefined, error: null }
+      : await this.client.from("report_drafts").select("*").eq("visit_id", visitId).order("version", { ascending: false }).limit(1).maybeSingle();
+    if (draftError) throw new Error("DRAFT_READ_FAILED:" + draftError.message);
+    const draft = (reportRow?.report_json ?? draftRow?.report_json) as ReportDraft | undefined;
     return { id: String(row.id), storeId: String(row.store_id), authorId: String(row.author_id), state: row.state as Visit["state"], startedAt: String(row.started_at), validatedAt: row.validated_at ? String(row.validated_at) : undefined, validatedBy: row.validated_by ? String(row.validated_by) : undefined, draft };
   }
 

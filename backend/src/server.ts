@@ -15,7 +15,7 @@ const supabaseAdmin = createSupabaseAdmin();
 const db = supabaseAdmin ? new SupabaseStore(supabaseAdmin) : new MemoryStore();
 const procedureAssistant = supabaseAdmin ? new ProcedureAssistant(supabaseAdmin) : undefined;
 const workflow = new VisitWorkflow(db, (question) => procedureAssistant?.answer(question) ?? Promise.resolve("Procedure retrieval is not configured yet."));
-app.use(cors());
+app.use(cors({ origin: config.dashboardOrigin }));
 app.use(express.json({
   verify: (request, _response, body) => {
     if (request.url?.split("?")[0] === "/api/webhooks/whatsapp") {
@@ -118,6 +118,10 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
       console.warn("UNIPILE_WEBHOOK_SIGNATURE_REJECTED", code);
       return response.status(code === "UNIPILE_WEBHOOK_SECRET_NOT_CONFIGURED" ? 503 : 401).json({ error: code });
     }
+    if (!config.hasUnipileIdentity) {
+      console.error("UNIPILE_WEBHOOK_IDENTITY_NOT_CONFIGURED");
+      return response.status(503).json({ error: "UNIPILE_WEBHOOK_IDENTITY_NOT_CONFIGURED" });
+    }
   }
   try {
     if (testEvent.success) return response.status(202).json(await workflow.handleIncomingText(testEvent.data));
@@ -126,9 +130,9 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
     // Unipile also posts events for messages that the assistant itself sends.
     // Ignore those before checking the human-sender allow-list.
     if (event.is_sender) return response.status(202).json({ ignored: true, reason: "OUTGOING_MESSAGE" });
-    if (config.unipileAccountId && event.account_id !== config.unipileAccountId) return response.status(403).json({ error: "UNKNOWN_UNIPILE_ACCOUNT" });
+    if (event.account_id !== config.unipileAccountId) return response.status(403).json({ error: "UNKNOWN_UNIPILE_ACCOUNT" });
     const senderId = event.sender?.attendee_provider_id ?? event.sender?.attendee_public_identifier;
-    if (config.unipileSenderId && senderId !== config.unipileSenderId) return response.status(403).json({ error: "UNKNOWN_WHATSAPP_SENDER" });
+    if (senderId !== config.unipileSenderId) return response.status(403).json({ error: "UNKNOWN_WHATSAPP_SENDER" });
     const providerMessageId = event.provider_message_id ?? event.message_id;
     if (!providerMessageId) return response.status(400).json({ error: "MISSING_PROVIDER_MESSAGE_ID" });
     if (event.attachments?.length && !event.message) {

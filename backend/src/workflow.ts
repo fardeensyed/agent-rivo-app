@@ -165,7 +165,7 @@ export class VisitWorkflow {
         if (requestedVersion && Number(requestedVersion) !== visit.draft.version) {
           return { visit, reply: `Draft ${requestedVersion} is outdated and was not validated. The current version is Draft ${visit.draft.version}.\n\n${this.formatDraft(visit)}` };
         }
-        const validated = await this.validate(user, visit.id, visit.draft.version);
+        const validated = await this.validate(user, visit.id, visit.draft.version, new Date().toISOString(), ingested.message.id);
         return { visit: validated, reply: `Report draft ${validated.draft?.version} is validated and final.` };
       }
       if (isCorrectionInstruction(input.text) && isAmbiguousCorrection(input.text)) {
@@ -284,12 +284,12 @@ export class VisitWorkflow {
     return this.prepareDraft(user, visit.id, draft);
   }
 
-  async validate(user: User, visitId: string, version: number, now = new Date().toISOString()) {
+  async validate(user: User, visitId: string, version: number, now = new Date().toISOString(), validationMessageId?: string) {
     const visit = await this.db.getVisit(visitId);
     if (!visit) throw new Error("NOT_FOUND");
     if ((await this.db.getVisitMessages(visit.id)).some((message) => message.processingStatus === "pending")) throw new Error("PENDING_AUDIO_PROCESSING");
     const validated = validateDraft(user, visit, version, now);
-    await this.db.saveVisit(validated);
+    await this.db.finalizeValidation(validated, validationMessageId);
     return validated;
   }
 
