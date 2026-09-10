@@ -55,6 +55,7 @@ Run these SQL migrations in order in Supabase SQL Editor:
 1. `supabase/migrations/001_agent_rivo.sql`
 2. `supabase/migrations/002_private_voice_storage.sql`
 3. `supabase/migrations/003_procedure_chunk_upsert_and_version.sql`
+4. `supabase/migrations/004_harden_read_scopes.sql`
 
 Seed the supplied candidate kit. Set `ASSESSMENT_KIT_DIR` to the folder containing `data/`, `procedures/` and `audio/`:
 
@@ -112,6 +113,7 @@ ngrok is not needed for dashboard-only testing. Send messages from the connected
 ```powershell
 npm run check
 npm run test
+npm run test:audit --workspace backend
 npm run build --workspace frontend
 ```
 
