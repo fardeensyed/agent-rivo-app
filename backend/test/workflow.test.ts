@@ -129,6 +129,18 @@ test("does not include standalone visit commands in a draft", async () => {
   assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance is tidy."]);
 });
 
+test("does not turn quoted report commands or review prompts into findings", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "quoted-command-start", actorId: user.id, text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "quoted-command-observation", actorId: user.id, text: "The stock room is clean." });
+  await workflow.ingestText({ providerKey: "quoted-command-review", actorId: user.id, text: "review the revised facts." });
+  await workflow.ingestText({ providerKey: "quoted-command-prepare", actorId: user.id, text: "‘prepare the report’." });
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The stock room is clean."]);
+});
+
 test("applies a quantity correction and preserves the audit trail in a revised draft", async () => {
   const db = new MemoryStore();
   const workflow = new VisitWorkflow(db);

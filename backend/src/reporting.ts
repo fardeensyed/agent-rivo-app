@@ -30,8 +30,10 @@ function observationSentences(message: Message): string[] {
     .replace(/^(?:i am |i'm )?(?:start(?:ing)?|begin(?:ning)?)\s+(?:a )?visit(?:\s+to\s+[^.!?]+)?\s*[,;:-]?\s*/i, "")
     .replace(/^(?:now\s+)?i am at (?:lyon|nantes|lille)[.!]?$/i, "")
   ).filter((sentence) => {
-    const lower = sentence.toLowerCase();
-    const isCommand = /^(?:lyon|nantes|lille)\.?$|^(?:start|starting|begin|beginning).*(visit)|^(?:cancel|abandon).*(?:start|switch)|^(prepare|show|finish|end).*(report|draft|visit)|^(finish|end|done|cancel|abandon)\.?$|^(i )?(validate|approve)|^(change|remove|replace|correct)\b/.test(lower);
+    const lower = sentence.toLowerCase()
+      .replace(/^[\s'"“”‘’`]+|[\s'"“”‘’`.,!?]+$/g, "")
+      .trim();
+    const isCommand = /^(?:lyon|nantes|lille)$|^(?:start|starting|begin|beginning).*\bvisit\b|^(?:cancel|abandon).*\b(?:start|switch)\b|^(?:prepare|show|finish|end)\b.*\b(?:report|draft|visit)\b|^(?:review|check)\b.*\b(?:revised facts|draft|report)\b|^(?:finish|end|done|cancel|abandon)$|^(?:i\s+)?(?:validate|approve)\b|^(?:change|remove|replace|correct)\b/.test(lower);
     return sentence.length > 2 && !isCommand;
   });
 }
