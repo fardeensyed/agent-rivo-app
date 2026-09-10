@@ -201,7 +201,7 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 | A02 | Implemented | Real phone recording is downloaded, transcribed, stored privately, and playable. |
 | A03 | Implemented | Text and voice contribute to one report. |
 | A04 | Implemented | Revised draft retains original source inputs and correction trail. |
-| A05 | Partial | Current-version approval, stale-version rejection, and final-state guard work; see limitations on a separate validated-report snapshot. |
+| A05 | Partial | Current-version approval, stale-version rejection, and final-state guard work. The separate immutable `validated_reports` snapshot is not yet written for new live validations. |
 | A06 | Implemented | Dashboard screens, real data, source timeline, report library, copy/print, and inclusive store/state/date/search filters work together. |
 | A07 | Implemented | Authorised users can inspect text, transcript, and private signed audio URL. |
 | A08 | Implemented | Procedure retrieval returns citations; unsupported questions return an honest no-answer response. |
@@ -227,7 +227,7 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 
 ## Known limitations
 
-- Validation makes the live visit read-only through the application workflow and saves validation metadata, but a new live validation does not yet populate the separate validated_reports snapshot table.
+- **A05 limitation — validated report snapshots:** validation makes the live visit read-only through the application workflow and saves validation metadata, but a new live validation does not yet populate the separate immutable `validated_reports` snapshot table. The dashboard currently reads the validated visit/draft state instead. This is a known partial requirement and should be implemented before treating the system as production-ready.
 - Silence protection combines audio-volume analysis and conservative transcript heuristics; it is not a full speech-activity model.
 - Corrections are deliberately conservative and request clarification for unusual or ambiguous wording.
 - Photos/OCR, PDF generation, realtime subscriptions, hosted deployment, and additional languages are optional and intentionally out of scope. Browser copy/print provides the required export capability.
