@@ -8,6 +8,7 @@ import { SupabaseStore } from "./supabase-store.js";
 import { createPrivateVoiceNoteUrl, createSupabaseAdmin, downloadUnipileAttachment, requireAudibleAudio, sendUnipileText, storePrivateVoiceNote, transcribeAudio } from "./integrations.js";
 import { ProcedureAssistant } from "./procedures.js";
 import { WebhookSignatureError, verifyUnipileAuthHeader, verifyUnipileSignature } from "./webhook-auth.js";
+import { canReadVisit } from "./domain.js";
 
 const app = express();
 const supabaseAdmin = createSupabaseAdmin();
@@ -73,7 +74,7 @@ app.get("/api/visits/:visitId", async (request, response) => {
     const user = await actor(request);
     const visit = await db.getVisit(request.params.visitId);
     if (!visit) return response.status(404).json({ error: "VISIT_NOT_FOUND" });
-    if (!user.storeIds.includes(visit.storeId)) return response.status(403).json({ error: "FORBIDDEN" });
+    if (!canReadVisit(user, visit)) return response.status(403).json({ error: "FORBIDDEN" });
     const stores = await db.getStores();
     const store = stores.find((item) => item.id === visit.storeId);
     if (!store) return response.status(404).json({ error: "STORE_NOT_FOUND" });
@@ -92,7 +93,11 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
     is_sender: z.boolean().optional()
   }).safeParse(request.body);
   if (!testEvent.success && !unipileEvent.success) return response.status(400).json({ error: "INVALID_EVENT" });
-  // Synthetic local test events intentionally bypass provider authentication.
+  // Synthetic events exist only for the isolated in-memory test runner. They
+  // must never be accepted by a deployed Supabase-backed webhook endpoint.
+  if (testEvent.success && !(config.enableLocalTestRunner && !config.hasSupabase)) {
+    return response.status(404).json({ error: "NOT_FOUND" });
+  }
   // Every real Unipile event must carry valid provider authentication.
   if (unipileEvent.success && !testEvent.success) {
     try {
@@ -177,7 +182,7 @@ app.get("/api/messages/:messageId/audio-url", async (request, response) => {
     const message = await db.getMessage(request.params.messageId);
     if (!message?.visitId || !message.audioPath) return response.status(404).json({ error: "AUDIO_NOT_FOUND" });
     const visit = await db.getVisit(message.visitId);
-    if (!visit || !user.storeIds.includes(visit.storeId)) return response.status(403).json({ error: "FORBIDDEN" });
+    if (!visit || !canReadVisit(user, visit)) return response.status(403).json({ error: "FORBIDDEN" });
     return response.json({ url: await createPrivateVoiceNoteUrl(message.audioPath), expiresIn: 300 });
   } catch (error) {
     return response.status(400).json({ error: error instanceof Error ? error.message : "AUDIO_URL_FAILED" });

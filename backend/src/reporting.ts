@@ -2,6 +2,16 @@ import type { Finding, Message, ReportDraft, Store, Visit } from "./domain.js";
 
 type Observation = { text: string; sourceMessageIds: string[] };
 
+// A field note can contain two independent, location-specific facts joined by
+// "and". Keep them separately correctable rather than deleting both facts when
+// the visitor later removes one of them.
+function splitIndependentLocationFacts(sentence: string): string[] {
+  const match = /^(.*\b(?:entrance|front(?: area)?|stockroom|backroom|delivery area|display|team)\b.*?)\s+and\s+((?:the\s+)?(?:entrance|front(?: area)?|stockroom|backroom|delivery area|display|team)\b.+)$/i.exec(sentence);
+  if (!match) return [sentence];
+  const second = match[2].replace(/^the\s+/i, "The ");
+  return [match[1].trim(), second.trim()];
+}
+
 const numberWords: Record<string, string> = {
   zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", ten: "10",
   eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15", sixteen: "16", seventeen: "17", eighteen: "18", nineteen: "19", twenty: "20"
@@ -28,8 +38,9 @@ function observationSentences(message: Message): string[] {
   const text = message.transcript ?? message.text ?? "";
   return text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).map((sentence) => sentence
     .replace(/^(?:i am |i'm )?(?:start(?:ing)?|begin(?:ning)?)\s+(?:a )?visit(?:\s+to\s+[^.!?]+)?\s*[,;:-]?\s*/i, "")
+    .replace(/^start\s+(?:a\s+)?(?:visit\s+(?:to\s+)?)?(?:lyon|nantes|lille)\s*[,;:-]?\s*/i, "")
     .replace(/^(?:now\s+)?i am at (?:lyon|nantes|lille)[.!]?$/i, "")
-  ).filter((sentence) => {
+  ).flatMap(splitIndependentLocationFacts).filter((sentence) => {
     const lower = sentence.toLowerCase()
       .replace(/^[\s'"“”‘’`]+|[\s'"“”‘’`.,!?]+$/g, "")
       .trim();
@@ -90,13 +101,12 @@ function applyCorrection(observations: Observation[], message: Message): void {
   const expression = variants && numericUnit
     ? new RegExp(`(?:${variants})\\s+${escapePattern(numericUnit)}`, "i")
     : new RegExp(escapePattern(previous), "i");
-  for (let index = observations.length - 1; index >= 0; index -= 1) {
-    const candidate = observations[index];
-    if (!normalizeNumbers(candidate.text).includes(normalizeNumbers(previous))) continue;
-    candidate.text = candidate.text.replace(expression, replacement);
-    candidate.sourceMessageIds = Array.from(new Set([...candidate.sourceMessageIds, message.id]));
-    return;
-  }
+  const matches = observations.filter((candidate) => normalizeNumbers(candidate.text).includes(normalizeNumbers(previous)));
+  // A correction must identify one fact. Silently choosing the last of several
+  // matches is not safe for a factual report.
+  if (matches.length !== 1) return;
+  matches[0].text = matches[0].text.replace(expression, replacement);
+  matches[0].sourceMessageIds = Array.from(new Set([...matches[0].sourceMessageIds, message.id]));
 }
 
 function categoryFor(text: string): Finding["category"] {
@@ -120,6 +130,19 @@ function isFollowUp(text: string): boolean {
   return /\b(should|please|ask|check .* with|by (monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i.test(text);
 }
 
+function resolveRelativeFollowUpDate(text: string, startedAt: string): string {
+  const weekdays: Record<string, number> = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+  return text.replace(/\bby (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i, (full, weekday: string) => {
+    const start = new Date(startedAt);
+    const target = weekdays[weekday.toLowerCase()];
+    if (!Number.isFinite(start.getTime()) || target === undefined) return full;
+    let offset = (target - start.getUTCDay() + 7) % 7;
+    if (offset === 0) offset = 7;
+    start.setUTCDate(start.getUTCDate() + offset);
+    return `${full} (${start.toISOString().slice(0, 10)})`;
+  });
+}
+
 export function buildFactualDraft(visit: Visit, store: Store, messages: Message[]): ReportDraft {
   const observations: Observation[] = [];
   for (const message of messages) {
@@ -138,7 +161,7 @@ export function buildFactualDraft(visit: Visit, store: Store, messages: Message[
     text: item.text,
     sourceMessageIds: item.sourceMessageIds
   }));
-  const followUpNotes = observations.filter((item) => isFollowUp(item.text)).map((item) => ({ text: item.text, sourceMessageIds: item.sourceMessageIds }));
+  const followUpNotes = observations.filter((item) => isFollowUp(item.text)).map((item) => ({ text: resolveRelativeFollowUpDate(item.text, visit.startedAt), sourceMessageIds: item.sourceMessageIds }));
   const sourceMessageIds = Array.from(new Set([...findings.flatMap((finding) => finding.sourceMessageIds), ...followUpNotes.flatMap((note) => note.sourceMessageIds)]));
   const date = new Intl.DateTimeFormat("en-CA", { timeZone: store.timezone }).format(new Date(visit.startedAt));
   return {

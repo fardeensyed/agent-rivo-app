@@ -46,7 +46,7 @@ export class MemoryStore implements DataRepository {
   }
 
   async getVisibleVisits(user: User): Promise<Visit[]> {
-    return this.visits.filter((visit) => visit.authorId === user.id || user.storeIds.includes(visit.storeId));
+    return this.visits.filter((visit) => user.storeIds.includes(visit.storeId) && (visit.authorId === user.id || visit.state === "validated"));
   }
 
   async getVisit(id: string): Promise<Visit | undefined> {
@@ -80,5 +80,9 @@ export class MemoryStore implements DataRepository {
     if (index < 0) throw new Error("MESSAGE_NOT_FOUND");
     this.messages[index] = message;
   }
-  async saveVisit(_visit: Visit): Promise<void> { /* object is already live in memory */ }
+  async saveVisit(visit: Visit): Promise<void> {
+    const index = this.visits.findIndex((item) => item.id === visit.id);
+    if (index < 0) throw new Error("VISIT_NOT_FOUND");
+    this.visits[index] = visit;
+  }
 }

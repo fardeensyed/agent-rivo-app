@@ -32,7 +32,28 @@ function isAmbiguousCorrection(text: string): boolean {
     && !/^\s*(?:remove|delete)\s*:/i.test(text);
 }
 
+function isApprovalIntent(text: string): boolean {
+  const value = text.trim().toLowerCase();
+  if (/\b(?:do not|don't|dont|not|never|without)\s+(?:validate|approve)\b/.test(value)) return false;
+  return /^(?:i\s+)?(?:validate|approve)\b/.test(value);
+}
+
+function unchangedDraft(left: Visit["draft"], right: Visit["draft"]): boolean {
+  if (!left || !right) return false;
+  return JSON.stringify({ findings: left.findings, followUpNotes: left.followUpNotes }) === JSON.stringify({ findings: right.findings, followUpNotes: right.followUpNotes });
+}
+
+function isAmbiguousDirectCorrection(text: string, visit: Visit): boolean {
+  const match = /^(?:change|correct|replace)\s*:?\s+(.+?)\s+(?:to|with)\s+.+?[.!?]?$/i.exec(text.trim());
+  if (!match || !visit.draft) return false;
+  const needle = match[1].toLowerCase().replace(/\b(?:fifteen|fourteen|thirteen|twelve|eleven|ten|nine|eight|seven|six|five|four|three|two|one|zero)\b/g, (word) => ({ zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", ten: "10", eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15" }[word] ?? word));
+  const normalise = (value: string) => value.toLowerCase().replace(/\b(?:fifteen|fourteen|thirteen|twelve|eleven|ten|nine|eight|seven|six|five|four|three|two|one|zero)\b/g, (word) => ({ zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", ten: "10", eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15" }[word] ?? word));
+  return visit.draft.findings.filter((finding) => normalise(finding.text).includes(needle)).length > 1;
+}
+
 export class VisitWorkflow {
+  private readonly providerLocks = new Map<string, Promise<void>>();
+
   constructor(
     private readonly db: DataRepository,
     private readonly answerProcedureQuestion: (question: string) => Promise<string> = async () => "Procedure retrieval is not configured yet."
@@ -64,6 +85,20 @@ export class VisitWorkflow {
   }
 
   async ingestText(input: { providerKey: string; actorId: string; text: string; receivedAt?: string }) {
+    const previous = this.providerLocks.get(input.providerKey);
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.providerLocks.set(input.providerKey, current);
+    await previous;
+    try {
+      return await this.ingestTextUnlocked(input);
+    } finally {
+      release();
+      if (this.providerLocks.get(input.providerKey) === current) this.providerLocks.delete(input.providerKey);
+    }
+  }
+
+  private async ingestTextUnlocked(input: { providerKey: string; actorId: string; text: string; receivedAt?: string }) {
     const existing = await this.db.getMessageByProviderKey(input.providerKey);
     if (existing) return { duplicate: true, message: existing, visit: existing.visitId ? await this.db.getVisit(existing.visitId) : undefined };
 
@@ -84,7 +119,7 @@ export class VisitWorkflow {
         ? "correction"
         : isProcedureQuestion(input.text)
           ? "procedural_question"
-          : /validate|approve/i.test(input.text)
+          : isApprovalIntent(input.text)
           ? "validation"
           : "text",
       text: input.text, processingStatus: "accepted", receivedAt: input.receivedAt ?? new Date().toISOString()
@@ -96,7 +131,12 @@ export class VisitWorkflow {
   async handleIncomingText(input: { providerKey: string; actorId: string; text: string; receivedAt?: string }): Promise<ConversationOutcome> {
     try {
       const ingested = await this.ingestText(input);
-      if (ingested.duplicate) return { duplicate: true, visit: ingested.visit };
+      if (ingested.duplicate) {
+        if (ingested.message.kind === "procedural_question") {
+          return { duplicate: true, visit: ingested.visit, reply: await this.answerProcedureQuestion(ingested.message.text ?? "") };
+        }
+        return { duplicate: true, visit: ingested.visit };
+      }
       if ("blockedStoreSwitch" in ingested && ingested.blockedStoreSwitch) {
         return { reply: "You already have an active visit. Please validate it, or say ‘Cancel the current visit and start [store]’. I kept the new store note pending and did not attach it to the active visit." };
       }
@@ -116,7 +156,10 @@ export class VisitWorkflow {
         const drafted = await this.prepareCurrentDraft(user, visit.id);
         return { visit: drafted, reply: this.formatDraft(drafted) };
       }
-      if (/\b(validate|approve)\b/.test(normalized)) {
+      if (/\b(?:validate|approve)\b/.test(normalized) && !isApprovalIntent(input.text)) {
+        return { visit, reply: "I only validate a report after a clear affirmative approval. Reply ‘I validate the latest draft’ when you are ready." };
+      }
+      if (isApprovalIntent(input.text)) {
         if (!visit.draft || visit.state !== "ready_for_review") return { visit, reply: "There is no current draft ready for validation. Ask me to prepare the report first." };
         const requestedVersion = /\bdraft\s+(?:version\s+)?(\d+)\b/i.exec(input.text)?.[1];
         if (requestedVersion && Number(requestedVersion) !== visit.draft.version) {
@@ -128,9 +171,16 @@ export class VisitWorkflow {
       if (isCorrectionInstruction(input.text) && isAmbiguousCorrection(input.text)) {
         return { visit, reply: "Which observation should I change or remove? Reply exactly like: Remove: The entrance is tidy. Or: Change: old text to new text." };
       }
+      if (isCorrectionInstruction(input.text) && isAmbiguousDirectCorrection(input.text, visit)) {
+        return { visit, reply: "Which matching observation should I change? Please quote the full observation to clarify." };
+      }
       if (visit.state === "ready_for_review") {
+        const previousDraft = visit.draft;
         const updated = await this.prepareCurrentDraft(user, visit.id);
         const correction = isCorrectionInstruction(input.text);
+        if (correction && unchangedDraft(previousDraft, updated.draft)) {
+          return { visit, reply: "I could not find one matching observation to change. Please quote the observation exactly, then tell me the replacement if needed." };
+        }
         return {
           visit: updated,
           reply: correction
@@ -188,13 +238,17 @@ export class VisitWorkflow {
     }
     if (visit.state === "ready_for_review") {
       const user = await this.db.getUser(completed.actorId);
+      const previousDraft = visit.draft;
       const updated = await this.prepareCurrentDraft(user, visit.id);
       const correction = kind === "correction";
+      if (correction && unchangedDraft(previousDraft, updated.draft)) {
+        return { visit, reply: "I could not find one matching observation to change. Please quote the observation exactly, then tell me the replacement if needed." };
+      }
       return {
         visit: updated,
         reply: correction
           ? `Voice correction applied. I created revised draft ${updated.draft?.version}. ${this.formatDraft(updated)}`
-          : `Voice note transcribed: “${completed.transcript}”\nI created draft ${updated.draft?.version} because the previous draft is now stale.`
+          : `Voice note transcribed: “${completed.transcript}”\nI created draft ${updated.draft?.version} because the previous draft is now stale.\n\n${this.formatDraft(updated)}`
       };
     }
     return { visit, reply: `Voice note transcribed and recorded: “${completed.transcript}”` };
@@ -211,6 +265,7 @@ export class VisitWorkflow {
   async prepareDraft(user: User, visitId: string, draft: NonNullable<Visit["draft"]>) {
     const visit = await this.db.getVisit(visitId);
     if (!visit || !canMutateVisit(user, visit)) throw new Error("FORBIDDEN");
+    if (visit.state === "validated" || visit.state === "cancelled") throw new Error("VISIT_FINAL");
     visit.draft = draft;
     visit.state = "ready_for_review";
     await this.db.saveVisit(visit);
@@ -220,6 +275,7 @@ export class VisitWorkflow {
   async prepareCurrentDraft(user: User, visitId: string) {
     const visit = await this.db.getVisit(visitId);
     if (!visit || !canMutateVisit(user, visit)) throw new Error("FORBIDDEN");
+    if (visit.state === "validated" || visit.state === "cancelled") throw new Error("VISIT_FINAL");
     const store = (await this.db.getStores()).find((item) => item.id === visit.storeId);
     if (!store) throw new Error("STORE_NOT_FOUND");
     const messages = await this.db.getVisitMessages(visit.id);
@@ -243,7 +299,8 @@ export class VisitWorkflow {
     const switchTarget = switchesStore ? text.slice(Math.max(text.toLowerCase().lastIndexOf("start"), text.toLowerCase().lastIndexOf("switch"))) : text;
     const storeMatch = stores.find((store) => switchTarget.toLowerCase().includes(store.city.toLowerCase()));
     let visit = existingVisitId ? await this.db.getVisit(existingVisitId) : await this.db.getActiveVisit(user.id);
-    const startsVisit = /\b(?:start|starting|begin|beginning)\b.*\bvisit\b/i.test(text);
+    const startsVisit = /\b(?:start|starting|begin|beginning)\b.*\bvisit\b/i.test(text)
+      || /^\s*start\s+(?:a\s+)?(?:lyon|nantes|lille)\b/i.test(text);
     const selectsNamedStore = Boolean(storeMatch && new RegExp(`^\\s*${storeMatch.city}\\s*[.!]?\\s*$`, "i").test(text));
     if (switchesStore && storeMatch && visit && visit.storeId !== storeMatch.id) {
       if (!canAccessStore(user, storeMatch.id)) throw new Error("FORBIDDEN_STORE");

@@ -28,9 +28,10 @@ export class SupabaseStore implements DataRepository {
   }
 
   async getVisibleVisits(user: User): Promise<Visit[]> {
-    const { data, error } = await this.client.from("visits").select("*").or(`author_id.eq.${user.id},store_id.in.(${user.storeIds.join(",")})`).order("started_at", { ascending: false });
+    const { data, error } = await this.client.from("visits").select("*").order("started_at", { ascending: false });
     if (error) throw new Error(`VISIT_READ_FAILED:${error.message}`);
-    return Promise.all((data ?? []).map((row) => this.toVisit(row as Row)));
+    const visits = await Promise.all((data ?? []).map((row) => this.toVisit(row as Row)));
+    return visits.filter((visit) => user.storeIds.includes(visit.storeId) && (visit.authorId === user.id || visit.state === "validated"));
   }
 
   async getVisit(id: string): Promise<Visit | undefined> {
@@ -88,6 +89,7 @@ export class SupabaseStore implements DataRepository {
   async updateMessage(message: Message): Promise<void> {
     const { error } = await this.client.from("messages").update({
       visit_id: message.visitId,
+      kind: message.kind,
       text_content: message.text,
       audio_storage_path: message.audioPath,
       transcript: message.transcript,

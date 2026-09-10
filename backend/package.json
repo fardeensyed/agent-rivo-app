@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/workflow.test.ts",
+    "test:audit": "node --import tsx --test test/release-audit.test.ts",
     "seed": "tsx src/seed.ts",
     "rag:ingest": "tsx src/rag-ingest.ts"
   },

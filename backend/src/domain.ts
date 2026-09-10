@@ -66,6 +66,10 @@ export function canMutateVisit(user: User, visit: Visit): boolean {
   return visit.authorId === user.id && canAccessStore(user, visit.storeId);
 }
 
+export function canReadVisit(user: User, visit: Visit): boolean {
+  return canAccessStore(user, visit.storeId) && (visit.authorId === user.id || visit.state === "validated");
+}
+
 export function validateDraft(user: User, visit: Visit, version: number, now: string): Visit {
   if (!canMutateVisit(user, visit)) throw new Error("FORBIDDEN");
   if (!visit.draft || visit.state !== "ready_for_review") throw new Error("DRAFT_NOT_READY");

@@ -170,15 +170,15 @@ test("answers a procedure question without adding it as a visit finding", async 
   assert.equal(draft.draft?.followUpNotes.length, 0);
 });
 
-test("does not turn cancel into a report finding", async () => {
+test("finalises a cancelled visit without allowing a new report", async () => {
   const db = new MemoryStore();
   const workflow = new VisitWorkflow(db);
   const user = await db.getUser("user_anika");
   const started = await workflow.ingestText({ providerKey: "cancel-start", actorId: user.id, text: "Start a visit to Lyon." });
   await workflow.ingestText({ providerKey: "cancel-note", actorId: user.id, text: "The entrance is tidy." });
   await workflow.handleIncomingText({ providerKey: "cancel-command", actorId: user.id, text: "cancel" });
-  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
-  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance is tidy."]);
+  assert.equal((await db.getVisit(started.visit!.id))?.state, "cancelled");
+  await assert.rejects(() => workflow.prepareCurrentDraft(user, started.visit!.id), /VISIT_FINAL/);
 });
 
 test("completes a voice note and uses its transcript as a factual observation", async () => {
@@ -343,4 +343,38 @@ test("accepts the documented colon correction format", async () => {
   const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
   assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance sign is damaged."]);
   assert.equal(drafted.draft?.version, 1);
+});
+
+test("does not treat a negative validation sentence as approval", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  await workflow.handleIncomingText({ providerKey: "negative-validation-start", actorId: "user_anika", text: "Start Lyon." });
+  await workflow.handleIncomingText({ providerKey: "negative-validation-note", actorId: "user_anika", text: "The entrance is tidy." });
+  const drafted = await workflow.handleIncomingText({ providerKey: "negative-validation-draft", actorId: "user_anika", text: "Prepare the report." });
+  const result = await workflow.handleIncomingText({ providerKey: "negative-validation-refusal", actorId: "user_anika", text: "Do not validate this report." });
+  assert.equal(result.visit?.state, "ready_for_review");
+  assert.match(result.reply ?? "", /clear affirmative approval/i);
+  assert.equal((await db.getVisit(drafted.visit!.id))?.state, "ready_for_review");
+});
+
+test("does not reopen a validated visit and persists that final state", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "final-visit-start", actorId: user.id, text: "Start Lyon." });
+  await workflow.ingestText({ providerKey: "final-visit-note", actorId: user.id, text: "The entrance is tidy." });
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  await workflow.validate(user, started.visit!.id, drafted.draft!.version);
+  assert.equal((await db.getVisit(started.visit!.id))?.state, "validated");
+  await assert.rejects(() => workflow.prepareCurrentDraft(user, started.visit!.id), /VISIT_FINAL/);
+});
+
+test("splits independent location facts so one clause can be removed safely", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "compound-start", actorId: user.id, text: "Start Lyon. The entrance sign is damaged and the stockroom sign is missing." });
+  await workflow.ingestText({ providerKey: "compound-remove", actorId: user.id, text: "Remove the entrance-sign observation only." });
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The stockroom sign is missing."]);
 });
