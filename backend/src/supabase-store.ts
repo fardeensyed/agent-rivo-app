@@ -101,13 +101,20 @@ export class SupabaseStore implements DataRepository {
 
   async saveVisit(visit: Visit): Promise<void> {
     if (visit.state === "validated") throw new Error("VALIDATION_MUST_USE_SNAPSHOT");
-    const { error } = await this.client.from("visits").update({ state: visit.state, validated_at: visit.validatedAt, validated_by: visit.validatedBy, latest_draft_version: visit.draft?.version ?? 0 }).eq("id", visit.id);
-    if (error) throw new Error(`VISIT_UPDATE_FAILED:${error.message}`);
-    if (visit.draft) {
-      const draft = visit.draft;
-      const { error: draftError } = await this.client.from("report_drafts").upsert({ visit_id: visit.id, version: draft.version, title: draft.title, summary: draft.summary, report_json: draft, source_message_ids: draft.sourceMessageIds }, { onConflict: "visit_id,version" });
-      if (draftError) throw new Error(`DRAFT_UPSERT_FAILED:${draftError.message}`);
-    }
+    const draft = visit.draft;
+    const { error } = await this.client.rpc("save_visit_state_and_draft", {
+      p_visit_id: visit.id,
+      p_state: visit.state,
+      p_validated_at: visit.validatedAt ?? null,
+      p_validated_by: visit.validatedBy ?? null,
+      p_latest_draft_version: draft?.version ?? 0,
+      p_draft_version: draft?.version ?? null,
+      p_title: draft?.title ?? null,
+      p_summary: draft?.summary ?? null,
+      p_report_json: draft ?? null,
+      p_source_message_ids: draft?.sourceMessageIds ?? null
+    });
+    if (error) throw new Error("VISIT_SAVE_FAILED:" + error.message);
   }
 
   async finalizeValidation(visit: Visit, validationMessageId?: string): Promise<void> {

@@ -114,8 +114,9 @@ In the Supabase SQL editor, run these migrations in order:
 3. supabase/migrations/003_procedure_chunk_upsert_and_version.sql
 4. supabase/migrations/004_harden_read_scopes.sql
 5. supabase/migrations/005_atomic_validated_report_snapshot.sql
+6. supabase/migrations/006_atomic_visit_draft_save.sql
 
-Migration 004 keeps drafts and message evidence private to their author until the visit is validated. Migration 005 atomically validates the visit and writes an immutable validated report snapshot.
+Migration 004 keeps drafts and message evidence private to their author until the visit is validated. Migration 005 atomically validates the visit and writes an immutable validated report snapshot. Migration 006 atomically saves ordinary visit state and draft changes.
 
 ### 4. Seed fixture data and procedure corpus
 

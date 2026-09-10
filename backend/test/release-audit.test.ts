@@ -213,6 +213,28 @@ test("A05: Supabase reads the immutable validated snapshot instead of a mutable 
   assert.deepEqual(visit?.draft, snapshot);
 });
 
+test("reliability: Supabase saves visit state and draft through one RPC", async () => {
+  let rpcName = "";
+  let rpcArgs: Record<string, unknown> = {};
+  const client = {
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      rpcName = name;
+      rpcArgs = args;
+      return { error: null };
+    }
+  } as unknown as SupabaseClient;
+  const db = new SupabaseStore(client);
+  await db.saveVisit({
+    id: "audit-visit", storeId: "store_lyon", authorId: "user_anika", state: "ready_for_review",
+    startedAt: "2026-09-10T08:00:00Z",
+    draft: { version: 2, title: "Lyon report", summary: "Draft facts.", findings: [], followUpNotes: [], sourceMessageIds: ["message-1"] }
+  });
+  assert.equal(rpcName, "save_visit_state_and_draft");
+  assert.equal(rpcArgs.p_visit_id, "audit-visit");
+  assert.equal(rpcArgs.p_draft_version, 2);
+  assert.deepEqual(rpcArgs.p_source_message_ids, ["message-1"]);
+});
+
 test("P02: relative follow-up date resolves using the visit context", async () => {
   const { workflow, db } = fixture();
   const start = await workflow.ingestText({ providerKey: "audit:date-start", actorId: "user_anika", text: "Start a visit to Lyon.", receivedAt: "2026-09-07T10:00:00+02:00" });
