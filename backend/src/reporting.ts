@@ -2,11 +2,23 @@ import type { Finding, Message, ReportDraft, Store, Visit } from "./domain.js";
 
 type Observation = { text: string; sourceMessageIds: string[] };
 
+const numberWords: Record<string, string> = {
+  zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", ten: "10",
+  eleven: "11", twelve: "12", thirteen: "13", fourteen: "14", fifteen: "15", sixteen: "16", seventeen: "17", eighteen: "18", nineteen: "19", twenty: "20"
+};
+
+function normalizeNumbers(value: string): string {
+  return value.toLowerCase().replace(/\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+)\b/g, (token) => numberWords[token] ?? token);
+}
+
 export function isCorrectionInstruction(text: string): boolean {
   const value = text.trim();
   return /^(?:change|correct|replace)\b/i.test(value)
+    || /^(?:change|correct|replace)\s*:/i.test(value)
     || /\bplease\s+(?:change|correct|replace|remove)\b/i.test(value)
     || /\bremove\s+(?:it|that|this)\b/i.test(value)
+    || /^(?:remove|delete)\b/i.test(value)
+    || /^(?:remove|delete)\s*:/i.test(value)
     || /\bcorrection to (?:my )?previous note\b/i.test(value)
     || /\bi said\b.*\bnot\b/i.test(value)
     || /\bplease use\b.*\bnot\b/i.test(value);
@@ -14,9 +26,12 @@ export function isCorrectionInstruction(text: string): boolean {
 
 function observationSentences(message: Message): string[] {
   const text = message.transcript ?? message.text ?? "";
-  return text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).map((sentence) => sentence.replace(/^(?:i am |i'm )?(?:start(?:ing)?|begin(?:ning)?)\s+(?:a )?visit(?:\s+to\s+[^.!?]+)?\s*[,;:-]?\s*/i, "")).filter((sentence) => {
+  return text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).map((sentence) => sentence
+    .replace(/^(?:i am |i'm )?(?:start(?:ing)?|begin(?:ning)?)\s+(?:a )?visit(?:\s+to\s+[^.!?]+)?\s*[,;:-]?\s*/i, "")
+    .replace(/^(?:now\s+)?i am at (?:lyon|nantes|lille)[.!]?$/i, "")
+  ).filter((sentence) => {
     const lower = sentence.toLowerCase();
-    const isCommand = /^(?:start|starting|begin|beginning).*(visit)|^(prepare|show|finish|end).*(report|draft|visit)|^(finish|end|done)\.?$|^(i )?(validate|approve)|^(change|remove|replace|correct)\b/.test(lower);
+    const isCommand = /^(?:lyon|nantes|lille)\.?$|^(?:start|starting|begin|beginning).*(visit)|^(?:cancel|abandon).*(?:start|switch)|^(prepare|show|finish|end).*(report|draft|visit)|^(finish|end|done|cancel|abandon)\.?$|^(i )?(validate|approve)|^(change|remove|replace|correct)\b/.test(lower);
     return sentence.length > 2 && !isCommand;
   });
 }
@@ -32,7 +47,24 @@ function escapePattern(value: string): string {
  */
 function applyCorrection(observations: Observation[], message: Message): void {
   const text = (message.transcript ?? message.text ?? "").trim();
-  const directMatch = /^(?:change|correct|replace)\s+(.+?)\s+(?:to|with)\s+(.+?)[.!?]?$/i.exec(text);
+  const removalMatch = /^(?:remove|delete)\s*:\s*(.+?)[.!?]?$/i.exec(text);
+  const naturalRemovalMatch = /^(?:remove|delete)\s+(?:(?:the|this)\s+)?(.+?)(?:\s+only)?[.!?]?$/i.exec(text);
+  if (removalMatch || naturalRemovalMatch) {
+    const normalize = (value: string) => value.trim().replace(/^['"]|['"]$/g, "").replace(/[.!?]+$/, "").toLowerCase();
+    const target = normalize(removalMatch?.[1] ?? naturalRemovalMatch![1]).replace(/[-_]/g, " ");
+    const exactIndex = observations.findIndex((observation) => normalize(observation.text) === target);
+    if (exactIndex >= 0) {
+      observations.splice(exactIndex, 1);
+      return;
+    }
+    const ignored = new Set(["a", "an", "the", "this", "that", "observation", "finding", "sentence", "issue", "only", "about", "from", "was", "another", "store"]);
+    const targetWords = target.split(/\s+/).filter((word) => word.length > 2 && !ignored.has(word));
+    const candidates = observations.map((observation, index) => ({ index, words: normalize(observation.text).replace(/[-_]/g, " ").split(/\s+/) }))
+      .filter((candidate) => targetWords.length > 0 && targetWords.every((word) => candidate.words.includes(word)));
+    if (candidates.length === 1) observations.splice(candidates[0].index, 1);
+    return;
+  }
+  const directMatch = /^(?:change|correct|replace)\s*:?[\s]+(.+?)\s+(?:to|with)\s+(.+?)[.!?]?$/i.exec(text);
   const spokenQuantityMatch = /(?:there\s+(?:are|is)\s+)?(?<replacement>\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?<unit>boxes?|items?|units?|pieces?)[^.!?]*?,\s*not\s+(?<previous>\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/i.exec(text);
   if (!directMatch && !spokenQuantityMatch) return;
 
@@ -45,10 +77,20 @@ function applyCorrection(observations: Observation[], message: Message): void {
     replacement = `${replacement} ${unit}`;
   }
 
-  const expression = new RegExp(escapePattern(previous), "i");
+  const numericPhrase = /\b(?<number>\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?<numericUnit>boxes?|items?|units?|pieces?)\b/i.exec(previous);
+  const numericToken = numericPhrase?.groups?.number;
+  const numericUnit = numericPhrase?.groups?.numericUnit;
+  const variants = numericToken && numberWords[numericToken.toLowerCase()]
+    ? `${escapePattern(numericToken)}|${numberWords[numericToken.toLowerCase()]}`
+    : numericToken && /^\d+$/.test(numericToken)
+      ? `${escapePattern(numericToken)}|${Object.entries(numberWords).find(([, value]) => value === numericToken)?.[0] ?? escapePattern(numericToken)}`
+      : undefined;
+  const expression = variants && numericUnit
+    ? new RegExp(`(?:${variants})\\s+${escapePattern(numericUnit)}`, "i")
+    : new RegExp(escapePattern(previous), "i");
   for (let index = observations.length - 1; index >= 0; index -= 1) {
     const candidate = observations[index];
-    if (!expression.test(candidate.text)) continue;
+    if (!normalizeNumbers(candidate.text).includes(normalizeNumbers(previous))) continue;
     candidate.text = candidate.text.replace(expression, replacement);
     candidate.sourceMessageIds = Array.from(new Set([...candidate.sourceMessageIds, message.id]));
     return;
@@ -80,6 +122,7 @@ export function buildFactualDraft(visit: Visit, store: Store, messages: Message[
   const observations: Observation[] = [];
   for (const message of messages) {
     if (message.processingStatus === "failed" || message.processingStatus === "pending") continue;
+    if (message.kind === "procedural_question" || message.kind === "validation") continue;
     if (message.kind === "correction" || isCorrectionInstruction(message.text ?? message.transcript ?? "")) {
       applyCorrection(observations, message);
       continue;

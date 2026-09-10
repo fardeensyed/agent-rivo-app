@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MemoryStore } from "../src/store.js";
 import { VisitWorkflow } from "../src/workflow.js";
+import { isUnsupportedProcedureAnswer, selectRelevantProcedureChunks } from "../src/procedures.js";
 
 test("replaying a provider event has one effect", async () => {
   const db = new MemoryStore();
@@ -11,6 +12,16 @@ test("replaying a provider event has one effect", async () => {
   assert.equal((await workflow.ingestText(event)).duplicate, true);
   assert.equal(db.visits.length, 1);
   assert.equal(db.messages.length, 1);
+});
+
+test("does not cite low-similarity SOP chunks for unsupported questions", () => {
+  const relevant = selectRelevantProcedureChunks([
+    { documentId: "SOP-02", title: "Stockroom", section: "Delivery", version: "1.0", content: "Delivery facts.", similarity: 0.42 },
+    { documentId: "SOP-03", title: "Equipment", section: "Information to collect", version: "1.0", content: "Equipment facts.", similarity: 0.81 }
+  ]);
+  assert.deepEqual(relevant.map((chunk) => chunk.documentId), ["SOP-03"]);
+  assert.equal(isUnsupportedProcedureAnswer("The store tax rate is not specified in the provided excerpts."), true);
+  assert.equal(isUnsupportedProcedureAnswer("Record the observed equipment symptom."), false);
 });
 
 test("validation requires the current draft version", async () => {
@@ -94,6 +105,18 @@ test("answers a procedure question without adding it as a visit finding", async 
   assert.equal(db.messages.at(-1)?.kind, "procedural_question");
   const draft = await workflow.prepareCurrentDraft(user, started.visit!.id);
   assert.equal(draft.draft?.findings.length, 0);
+  assert.equal(draft.draft?.followUpNotes.length, 0);
+});
+
+test("does not turn cancel into a report finding", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "cancel-start", actorId: user.id, text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "cancel-note", actorId: user.id, text: "The entrance is tidy." });
+  await workflow.handleIncomingText({ providerKey: "cancel-command", actorId: user.id, text: "cancel" });
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance is tidy."]);
 });
 
 test("completes a voice note and uses its transcript as a factual observation", async () => {
@@ -140,10 +163,48 @@ test("applies a natural spoken quantity correction", async () => {
   assert.equal(drafted.draft?.findings[0]?.sourceMessageIds.length, 2);
 });
 
-test("does not attach another store's notes to an active visit", async () => {
-  const workflow = new VisitWorkflow(new MemoryStore());
-  await workflow.ingestText({ providerKey: "switch-start", actorId: "user_anika", text: "Start a visit to Lyon." });
-  await assert.rejects(() => workflow.ingestText({ providerKey: "switch-other-store", actorId: "user_anika", text: "Now I am at Nantes. The entrance is tidy." }), /ACTIVE_VISIT_REQUIRES_FINISH_OR_CANCEL/);
+test("matches spoken number words to digit transcriptions", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "digit-correction-start", actorId: user.id, text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "digit-correction-original", actorId: user.id, text: "There are 15 boxes outside storage." });
+  await workflow.ingestText({ providerKey: "digit-correction-change", actorId: user.id, text: "Change fifteen boxes to five." });
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["There are five boxes outside storage."]);
+});
+
+test("holds a cross-store note and moves it only after an explicit cancel-and-switch", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const lyon = await workflow.ingestText({ providerKey: "switch-start", actorId: "user_anika", text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "switch-lyon-note", actorId: "user_anika", text: "There are boxes outside storage." });
+  const blocked = await workflow.handleIncomingText({ providerKey: "switch-other-store", actorId: "user_anika", text: "Now I am at Nantes. The entrance is tidy." });
+  assert.match(blocked.reply ?? "", /kept the new store note pending/i);
+  assert.equal(db.messages.at(-1)?.visitId, undefined);
+  const switched = await workflow.handleIncomingText({ providerKey: "switch-confirm", actorId: "user_anika", text: "Cancel the Lyon draft and start Nantes." });
+  assert.equal(switched.visit?.storeId, "store_nantes");
+  assert.equal((await db.getVisit(lyon.visit!.id))?.state, "cancelled");
+  const user = await db.getUser("user_anika");
+  const drafted = await workflow.prepareCurrentDraft(user, switched.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance is tidy."]);
+});
+
+test("rejects approval of an explicitly outdated draft version", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const started = await workflow.ingestText({ providerKey: "stale-start", actorId: "user_anika", text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "stale-note", actorId: "user_anika", text: "There are fifteen boxes outside storage." });
+  const user = await db.getUser("user_anika");
+  await workflow.prepareCurrentDraft(user, started.visit!.id);
+  const corrected = await workflow.handleIncomingText({ providerKey: "stale-correction", actorId: "user_anika", text: "Change fifteen boxes to five." });
+  assert.equal(corrected.visit?.draft?.version, 2);
+  const rejected = await workflow.handleIncomingText({ providerKey: "stale-approval", actorId: "user_anika", text: "I validate report draft 1." });
+  assert.match(rejected.reply ?? "", /Draft 1 is outdated and was not validated/i);
+  assert.equal(rejected.visit?.state, "ready_for_review");
+  const validated = await workflow.handleIncomingText({ providerKey: "current-approval", actorId: "user_anika", text: "I validate report draft 2." });
+  assert.equal(validated.visit?.state, "validated");
+  assert.equal(validated.visit?.draft?.version, 2);
 });
 
 test("keeps an observation sent before store selection and attaches it after an explicit visit start", async () => {
@@ -178,6 +239,46 @@ test("asks for clarification instead of claiming an ambiguous correction was app
   const user = await db.getUser("user_anika");
   await workflow.prepareCurrentDraft(user, started.visit!.id);
   const result = await workflow.handleIncomingText({ providerKey: "ambiguous-remove", actorId: "user_anika", text: "Please remove it." });
-  assert.match(result.reply ?? "", /which observation/i);
+  assert.match(result.reply ?? "", /Remove: The entrance is tidy/i);
   assert.equal(result.visit?.draft?.version, 1);
+});
+
+test("removes an explicitly quoted observation in a revised draft", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "remove-start", actorId: user.id, text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "remove-note", actorId: user.id, text: "The entrance is tidy." });
+  await workflow.prepareCurrentDraft(user, started.visit!.id);
+  const result = await workflow.handleIncomingText({ providerKey: "remove-command", actorId: user.id, text: "Remove: The entrance is tidy." });
+  assert.equal(result.visit?.draft?.findings.length, 0);
+  assert.match(result.reply ?? "", /Correction applied/i);
+});
+
+test("asks which matching observation to remove, then accepts a specific natural removal", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "natural-remove-start", actorId: user.id, text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "natural-remove-note", actorId: user.id, text: "The entrance sign is damaged. The stockroom sign is missing." });
+  await workflow.prepareCurrentDraft(user, started.visit!.id);
+  const ambiguous = await workflow.handleIncomingText({ providerKey: "natural-remove-ambiguous", actorId: user.id, text: "Remove the sign issue." });
+  assert.match(ambiguous.reply ?? "", /which observation/i);
+  assert.equal(ambiguous.visit?.draft?.version, 1);
+  const specific = await workflow.handleIncomingText({ providerKey: "natural-remove-specific", actorId: user.id, text: "Remove the entrance-sign observation only." });
+  assert.deepEqual(specific.visit?.draft?.findings.map((finding) => finding.text), ["The stockroom sign is missing."]);
+  assert.equal(specific.visit?.draft?.version, 2);
+});
+
+test("accepts the documented colon correction format", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const user = await db.getUser("user_anika");
+  const started = await workflow.ingestText({ providerKey: "colon-change-start", actorId: user.id, text: "Start a visit to Lyon." });
+  await workflow.ingestText({ providerKey: "colon-change-note", actorId: user.id, text: "The entrance is tidy." });
+  const recorded = await workflow.handleIncomingText({ providerKey: "colon-change-command", actorId: user.id, text: "Change: The entrance is tidy to The entrance sign is damaged." });
+  assert.match(recorded.reply ?? "", /Correction recorded/i);
+  const drafted = await workflow.prepareCurrentDraft(user, started.visit!.id);
+  assert.deepEqual(drafted.draft?.findings.map((finding) => finding.text), ["The entrance sign is damaged."]);
+  assert.equal(drafted.draft?.version, 1);
 });

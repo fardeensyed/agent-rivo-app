@@ -26,7 +26,10 @@ export interface ConversationOutcome {
 }
 
 function isAmbiguousCorrection(text: string): boolean {
-  return /\b(?:remove|change|correct|replace)\s+(?:it|that|this)\b/i.test(text);
+  if (/\b(?:remove|change|correct|replace)\s+(?:it|that|this)\b/i.test(text)) return true;
+  return /^(?:remove|delete)\b/i.test(text)
+    && !/\b(?:entrance|stockroom|backroom|tablet|printer|employee|team|boxes|display|delivery|front|signage)\b/i.test(text)
+    && !/^\s*(?:remove|delete)\s*:/i.test(text);
 }
 
 export class VisitWorkflow {
@@ -65,7 +68,15 @@ export class VisitWorkflow {
     if (existing) return { duplicate: true, message: existing, visit: existing.visitId ? await this.db.getVisit(existing.visitId) : undefined };
 
     const user = await this.db.getUser(input.actorId);
-    const visit = await this.resolveVisitForInput(user, input.text, input.receivedAt);
+    let visit: Visit | undefined;
+    let blockedStoreSwitch = false;
+    try {
+      visit = await this.resolveVisitForInput(user, input.text, input.receivedAt);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "ACTIVE_VISIT_REQUIRES_FINISH_OR_CANCEL") throw error;
+      blockedStoreSwitch = true;
+      visit = undefined;
+    }
 
     const message: Message = {
       id: randomUUID(), providerKey: input.providerKey, actorId: user.id, visitId: visit?.id,
@@ -79,18 +90,23 @@ export class VisitWorkflow {
       text: input.text, processingStatus: "accepted", receivedAt: input.receivedAt ?? new Date().toISOString()
     };
     await this.db.insertMessage(message);
-    return { duplicate: false, message, visit };
+    return { duplicate: false, message, visit, blockedStoreSwitch };
   }
 
   async handleIncomingText(input: { providerKey: string; actorId: string; text: string; receivedAt?: string }): Promise<ConversationOutcome> {
     try {
       const ingested = await this.ingestText(input);
       if (ingested.duplicate) return { duplicate: true, visit: ingested.visit };
+      if ("blockedStoreSwitch" in ingested && ingested.blockedStoreSwitch) {
+        return { reply: "You already have an active visit. Please validate it, or say ‘Cancel the current visit and start [store]’. I kept the new store note pending and did not attach it to the active visit." };
+      }
       const visit = ingested.visit;
       const user = await this.db.getUser(input.actorId);
       const normalized = input.text.toLowerCase();
       if (isProcedureQuestion(input.text)) return { visit, reply: await this.answerProcedureQuestion(input.text) };
       if (!visit) return { reply: "Which authorised store are you visiting? Please choose Lyon or Nantes.", visit };
+      const switchesStore = /\b(?:cancel|abandon)\b.*\b(?:start|switch)\b/i.test(input.text);
+      if (switchesStore) return { visit, reply: "The previous visit was cancelled and the new store visit was started. I attached the pending observation to this visit without carrying over the previous store’s notes." };
       if (/\b(cancel|abandon)\b/.test(normalized)) {
         visit.state = "cancelled";
         await this.db.saveVisit(visit);
@@ -102,11 +118,15 @@ export class VisitWorkflow {
       }
       if (/\b(validate|approve)\b/.test(normalized)) {
         if (!visit.draft || visit.state !== "ready_for_review") return { visit, reply: "There is no current draft ready for validation. Ask me to prepare the report first." };
+        const requestedVersion = /\bdraft\s+(?:version\s+)?(\d+)\b/i.exec(input.text)?.[1];
+        if (requestedVersion && Number(requestedVersion) !== visit.draft.version) {
+          return { visit, reply: `Draft ${requestedVersion} is outdated and was not validated. The current version is Draft ${visit.draft.version}.\n\n${this.formatDraft(visit)}` };
+        }
         const validated = await this.validate(user, visit.id, visit.draft.version);
         return { visit: validated, reply: `Report draft ${validated.draft?.version} is validated and final.` };
       }
       if (isCorrectionInstruction(input.text) && isAmbiguousCorrection(input.text)) {
-        return { visit, reply: "Which observation should I change or remove? Please quote the observation, then tell me the replacement if needed." };
+        return { visit, reply: "Which observation should I change or remove? Reply exactly like: Remove: The entrance is tidy. Or: Change: old text to new text." };
       }
       if (visit.state === "ready_for_review") {
         const updated = await this.prepareCurrentDraft(user, visit.id);
@@ -118,6 +138,7 @@ export class VisitWorkflow {
             : `I updated the visit with your new information. ${this.formatDraft(updated)}`
         };
       }
+      if (isCorrectionInstruction(input.text)) return { visit, reply: "Correction recorded. Ask me to prepare the report when you are ready to review the revised facts." };
       return { visit, reply: "Recorded. Send another observation, ask a procedure question, or say ‘prepare the report’." };
     } catch (error) {
       if (error instanceof Error && error.message === "ACTIVE_VISIT_REQUIRES_FINISH_OR_CANCEL") {
@@ -163,7 +184,7 @@ export class VisitWorkflow {
     if (kind === "procedural_question") return { visit, reply: await this.answerProcedureQuestion(completed.transcript ?? transcript) };
     if (!visit) return { reply: `Transcript: “${completed.transcript}”\nStart a visit before sending observations.` };
     if (kind === "correction" && isAmbiguousCorrection(completed.transcript ?? transcript)) {
-      return { visit, reply: "Which observation should I change or remove? Please quote the observation, then tell me the replacement if needed." };
+      return { visit, reply: "Which observation should I change or remove? Reply exactly like: Remove: The entrance is tidy. Or: Change: old text to new text." };
     }
     if (visit.state === "ready_for_review") {
       const user = await this.db.getUser(completed.actorId);
@@ -218,24 +239,47 @@ export class VisitWorkflow {
 
   private async resolveVisitForInput(user: User, text: string, receivedAt?: string, existingVisitId?: string): Promise<Visit | undefined> {
     const stores = await this.db.getStores();
-    const storeMatch = stores.find((store) => text.toLowerCase().includes(store.city.toLowerCase()));
+    const switchesStore = /\b(?:cancel|abandon)\b.*\b(?:start|switch)\b/i.test(text);
+    const switchTarget = switchesStore ? text.slice(Math.max(text.toLowerCase().lastIndexOf("start"), text.toLowerCase().lastIndexOf("switch"))) : text;
+    const storeMatch = stores.find((store) => switchTarget.toLowerCase().includes(store.city.toLowerCase()));
     let visit = existingVisitId ? await this.db.getVisit(existingVisitId) : await this.db.getActiveVisit(user.id);
     const startsVisit = /\b(?:start|starting|begin|beginning)\b.*\bvisit\b/i.test(text);
-    if (startsVisit && storeMatch) {
+    const selectsNamedStore = Boolean(storeMatch && new RegExp(`^\\s*${storeMatch.city}\\s*[.!]?\\s*$`, "i").test(text));
+    if (switchesStore && storeMatch && visit && visit.storeId !== storeMatch.id) {
+      if (!canAccessStore(user, storeMatch.id)) throw new Error("FORBIDDEN_STORE");
+      visit.state = "cancelled";
+      await this.db.saveVisit(visit);
+      const newVisit: Visit = { id: randomUUID(), storeId: storeMatch.id, authorId: user.id, state: "collecting", startedAt: receivedAt ?? new Date().toISOString() };
+      await this.db.insertVisit(newVisit);
+      await this.attachRecentUnassignedMessages(user, newVisit, stores);
+      return newVisit;
+    }
+    if ((startsVisit || selectsNamedStore) && storeMatch) {
       if (!canAccessStore(user, storeMatch.id)) throw new Error("FORBIDDEN_STORE");
       if (visit && visit.storeId !== storeMatch.id) throw new Error("ACTIVE_VISIT_REQUIRES_FINISH_OR_CANCEL");
       if (!visit) {
         visit = { id: randomUUID(), storeId: storeMatch.id, authorId: user.id, state: "collecting", startedAt: receivedAt ?? new Date().toISOString() };
         await this.db.insertVisit(visit);
-        const unassigned = await this.db.getUnassignedMessagesForUser(user.id);
-        for (const message of unassigned) {
-          if (message.kind === "procedural_question" || message.kind === "validation") continue;
-          await this.db.updateMessage({ ...message, visitId: visit.id });
-        }
+        await this.attachRecentUnassignedMessages(user, visit, stores);
       }
     }
     if (visit && storeMatch && visit.storeId !== storeMatch.id && !isProcedureQuestion(text)) throw new Error("ACTIVE_VISIT_REQUIRES_FINISH_OR_CANCEL");
     return visit;
+  }
+
+  private async attachRecentUnassignedMessages(user: User, visit: Visit, stores: Awaited<ReturnType<DataRepository["getStores"]>>): Promise<void> {
+    const visitStart = Date.parse(visit.startedAt);
+    const unassigned = await this.db.getUnassignedMessagesForUser(user.id);
+    for (const message of unassigned) {
+      if (message.kind !== "text" && message.kind !== "audio") continue;
+      const value = (message.transcript ?? message.text ?? "").trim();
+      const age = visitStart - Date.parse(message.receivedAt);
+      if (!Number.isFinite(age) || age < 0 || age > 30 * 60 * 1000) continue;
+      if (/^(?:lyon|nantes|lille)[.!]?$/i.test(value) || /\b(?:start|prepare|show|finish|end|cancel|abandon|validate|approve)\b/i.test(value)) continue;
+      const mentionedStore = stores.find((store) => value.toLowerCase().includes(store.city.toLowerCase()));
+      if (mentionedStore && mentionedStore.id !== visit.storeId) continue;
+      await this.db.updateMessage({ ...message, visitId: visit.id });
+    }
   }
 
   private formatDraft(visit: Visit): string {

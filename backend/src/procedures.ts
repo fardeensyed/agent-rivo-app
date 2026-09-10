@@ -17,6 +17,16 @@ export interface RetrievedProcedureChunk extends ProcedureChunk {
   similarity: number;
 }
 
+const MIN_PROCEDURE_SIMILARITY = 0.55;
+
+export function selectRelevantProcedureChunks(chunks: RetrievedProcedureChunk[]): RetrievedProcedureChunk[] {
+  return chunks.filter((chunk) => chunk.similarity >= MIN_PROCEDURE_SIMILARITY);
+}
+
+export function isUnsupportedProcedureAnswer(answer: string): boolean {
+  return /\b(?:not specified|not provided|not mentioned|could not find|does not (?:specify|provide)|no approved procedure)\b/i.test(answer);
+}
+
 type ProcedureDocument = { id: string; title: string; version: string; path: string };
 
 let extractor: Promise<FeatureExtractionPipeline> | undefined;
@@ -90,7 +100,7 @@ export class ProcedureAssistant {
   constructor(private readonly client: SupabaseClient) {}
 
   async answer(question: string): Promise<string> {
-    const chunks = await retrieveProcedureChunks(this.client, question);
+    const chunks = selectRelevantProcedureChunks(await retrieveProcedureChunks(this.client, question));
     if (!chunks.length) return "I could not find an approved procedure that answers that. Please check the applicable internal agreement or ask headquarters.";
     // Keep the answer grounded in the best-matching SOP. A nearby passage from
     // another procedure can be topically similar but still be wrong guidance.
@@ -113,6 +123,9 @@ export class ProcedureAssistant {
       });
       answer = completion.choices[0]?.message.content?.trim() || "The approved procedure does not provide a complete answer to that question.";
     }
+    // An honest unsupported answer must not be decorated with unrelated
+    // nearest-neighbour citations, even when retrieval returned weak matches.
+    if (isUnsupportedProcedureAnswer(answer)) return answer;
     const citations = groundedChunks.map((chunk) => `• ${chunk.documentId}: ${chunk.title} — ${chunk.section} (v${chunk.version})`).join("\n");
     return `${answer}\n\nSources:\n${citations}`;
   }

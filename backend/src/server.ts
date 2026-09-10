@@ -24,7 +24,9 @@ async function actor(request: express.Request) {
     if (error || !data.user) throw new Error("UNAUTHENTICATED");
     return db.getUserByAuthId(data.user.id);
   }
-  if (config.enableLocalTestRunner) return db.getUser(String(request.header("x-demo-user") || "user_anika"));
+  // Never allow the local identity override when a real Supabase backend is configured.
+  // This prevents an accidentally enabled development flag from bypassing Auth.
+  if (config.enableLocalTestRunner && !config.hasSupabase) return db.getUser(String(request.header("x-demo-user") || "user_anika"));
   throw new Error("UNAUTHENTICATED");
 }
 
