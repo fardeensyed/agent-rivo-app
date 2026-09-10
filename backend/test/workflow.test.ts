@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { audioAppearsSilent, requireReliableTranscript } from "../src/integrations.js";
 import { MemoryStore } from "../src/store.js";
 import { VisitWorkflow } from "../src/workflow.js";
 import { isUnsupportedProcedureAnswer, selectRelevantProcedureChunks } from "../src/procedures.js";
@@ -12,6 +13,19 @@ test("replaying a provider event has one effect", async () => {
   assert.equal((await workflow.ingestText(event)).duplicate, true);
   assert.equal(db.visits.length, 1);
   assert.equal(db.messages.length, 1);
+});
+
+test("rejects empty and obvious silence hallucinations from voice transcription", () => {
+  assert.throws(() => requireReliableTranscript("you"), /VOICE_TRANSCRIPT_UNRELIABLE/);
+  assert.throws(() => requireReliableTranscript("Thank you."), /VOICE_TRANSCRIPT_UNRELIABLE/);
+  assert.throws(() => requireReliableTranscript("   "), /VOICE_TRANSCRIPT_UNRELIABLE/);
+  assert.equal(requireReliableTranscript("The entrance is tidy."), "The entrance is tidy.");
+});
+
+test("recognises an FFmpeg near-silence measurement before transcription", () => {
+  assert.equal(audioAppearsSilent("max_volume: -67.4 dB"), true);
+  assert.equal(audioAppearsSilent("max_volume: -18.2 dB"), false);
+  assert.equal(audioAppearsSilent("max_volume: -inf dB"), true);
 });
 
 test("does not cite low-similarity SOP chunks for unsupported questions", () => {

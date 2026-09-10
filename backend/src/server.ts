@@ -5,7 +5,7 @@ import { MemoryStore } from "./store.js";
 import { VisitWorkflow, type UnipileMessageReceivedEvent } from "./workflow.js";
 import { config } from "./config.js";
 import { SupabaseStore } from "./supabase-store.js";
-import { createPrivateVoiceNoteUrl, createSupabaseAdmin, downloadUnipileAttachment, sendUnipileText, storePrivateVoiceNote, transcribeAudio } from "./integrations.js";
+import { createPrivateVoiceNoteUrl, createSupabaseAdmin, downloadUnipileAttachment, requireAudibleAudio, sendUnipileText, storePrivateVoiceNote, transcribeAudio } from "./integrations.js";
 import { ProcedureAssistant } from "./procedures.js";
 
 const app = express();
@@ -101,6 +101,7 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
       const outcome = await workflow.ingestUnipileEvent(event as UnipileMessageReceivedEvent, config.unipileActorId);
       if ("duplicate" in outcome && outcome.duplicate) return response.status(202).json(outcome);
       if (!("message" in outcome) || !outcome.message) return response.status(202).json(outcome);
+      let storagePath: string | undefined;
       try {
         const attachment = event.attachments[0];
         const attachmentId = attachment.id ?? attachment.attachment_id;
@@ -110,14 +111,15 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
         const downloaded = await downloadUnipileAttachment(event.message_id, attachmentId);
         const contentType = attachment.mimetype ?? attachment.mime_type ?? downloaded.contentType;
         const extension = contentType.includes("mpeg") ? "mp3" : contentType.includes("mp4") ? "m4a" : contentType.includes("webm") ? "webm" : contentType.includes("wav") ? "wav" : "ogg";
-        const storagePath = `${outcome.message.visitId ?? "unassigned"}/${outcome.message.id}.${extension}`;
+        storagePath = `${outcome.message.visitId ?? "unassigned"}/${outcome.message.id}.${extension}`;
         await storePrivateVoiceNote(storagePath, downloaded.bytes, contentType);
+        await requireAudibleAudio(downloaded.bytes);
         const transcript = await transcribeAudio(downloaded.bytes, attachment.name ?? `voice-note.${extension}`);
         const completed = await workflow.completeAudioMessage(outcome.message, transcript, storagePath);
         if (event.chat_id && completed.reply) await sendUnipileText(event.chat_id, completed.reply);
         return response.status(202).json({ ...completed, message: { ...outcome.message, audioPath: storagePath, transcript, processingStatus: "completed" } });
       } catch (voiceError) {
-        await workflow.failAudioMessage(outcome.message, voiceError);
+        await workflow.failAudioMessage({ ...outcome.message, audioPath: storagePath ?? outcome.message.audioPath }, voiceError);
         console.error("VOICE_PROCESSING_FAILED", voiceError instanceof Error ? voiceError.message : "UNKNOWN");
         if (event.chat_id) {
           try { await sendUnipileText(event.chat_id, "I received the voice note but could not transcribe it. Please resend it or send the observation as text."); }

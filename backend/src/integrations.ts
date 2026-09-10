@@ -1,6 +1,14 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import Groq from "groq-sdk";
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { config } from "./config.js";
+
+const require = createRequire(import.meta.url);
+const ffmpegPath = require("ffmpeg-static") as string | null;
 
 export function createSupabaseAdmin(): SupabaseClient | undefined {
   if (!config.hasSupabase) return undefined;
@@ -11,12 +19,63 @@ export function createGroqClient(): Groq | undefined {
   return config.hasGroq ? new Groq({ apiKey: config.groqApiKey }) : undefined;
 }
 
+export function requireReliableTranscript(value: string): string {
+  const transcript = value.trim();
+  const normalized = transcript.toLocaleLowerCase().replace(/[.!?]+$/g, "").trim();
+  // Whisper can emit a short hallucination for silence. These tokens are not
+  // useful factual observations and must never enter a visit report.
+  if (!normalized || /^(you|the|uh|um|okay|ok|yeah|yes|no|hmm|mm|thank you|thanks|thank you very much|you are welcome|thanks for listening|thanks for watching|bye|goodbye|the end)$/.test(normalized)) {
+    throw new Error("VOICE_TRANSCRIPT_UNRELIABLE");
+  }
+  return transcript;
+}
+
+const SILENT_AUDIO_MAX_DB = -55;
+
+export function audioAppearsSilent(ffmpegOutput: string): boolean {
+  const value = ffmpegOutput.match(/max_volume:\s*(-?(?:\d+(?:\.\d+)?|inf)) dB/i)?.[1];
+  if (!value) throw new Error("VOICE_AUDIO_ANALYSIS_FAILED");
+  if (value.toLowerCase() === "-inf") return true;
+  const maxVolume = Number(value);
+  if (!Number.isFinite(maxVolume)) throw new Error("VOICE_AUDIO_ANALYSIS_FAILED");
+  return maxVolume <= SILENT_AUDIO_MAX_DB;
+}
+
+export async function requireAudibleAudio(audio: Buffer): Promise<void> {
+  if (!ffmpegPath) throw new Error("VOICE_AUDIO_ANALYSIS_UNAVAILABLE");
+  // MP4/M4A metadata needs random access, so analyse a temporary local copy
+  // rather than streaming bytes through stdin. The directory is deleted in all cases.
+  const directory = await mkdtemp(path.join(tmpdir(), "agent-rivo-audio-"));
+  const audioFile = path.join(directory, "input-audio");
+  try {
+    await writeFile(audioFile, audio);
+    const output = await new Promise<string>((resolve, reject) => {
+      const child = spawn(ffmpegPath, ["-hide_banner", "-i", audioFile, "-vn", "-af", "volumedetect", "-f", "null", "-"], {
+        stdio: ["ignore", "ignore", "pipe"]
+      });
+      let stderr = "";
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      child.once("error", reject);
+      child.once("close", (code: number | null) => code === 0 ? resolve(stderr) : reject(new Error(`VOICE_AUDIO_ANALYSIS_FAILED:${code}`)));
+    });
+    if (audioAppearsSilent(output)) throw new Error("VOICE_NOTE_SILENT");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 export async function transcribeAudio(audio: Buffer, filename = "voice-note.wav") {
   const groq = createGroqClient();
   if (!groq) throw new Error("GROQ_NOT_CONFIGURED");
   const bytes = audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength) as ArrayBuffer;
-  const result = await groq.audio.transcriptions.create({ file: new File([bytes], filename), model: config.groqSttModel, response_format: "json" });
-  return result.text;
+  const result = await groq.audio.transcriptions.create({
+    file: new File([bytes], filename),
+    model: config.groqSttModel,
+    response_format: "json",
+    temperature: 0
+  });
+  return requireReliableTranscript(result.text);
 }
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
