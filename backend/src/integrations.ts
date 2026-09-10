@@ -21,10 +21,16 @@ export function createGroqClient(): Groq | undefined {
 
 export function requireReliableTranscript(value: string): string {
   const transcript = value.trim();
-  const normalized = transcript.toLocaleLowerCase().replace(/[.!?]+$/g, "").trim();
+  const normalized = transcript
+    .toLocaleLowerCase()
+    .replace(/’/g, "'")
+    .replace(/[^\p{L}\p{N}']+/gu, " ")
+    .trim();
   // Whisper can emit a short hallucination for silence. These tokens are not
   // useful factual observations and must never enter a visit report.
-  if (!normalized || /^(you|the|uh|um|okay|ok|yeah|yes|no|hmm|mm|thank you|thanks|thank you very much|you are welcome|thanks for listening|thanks for watching|bye|goodbye|the end)$/.test(normalized)) {
+  const genericSilenceOutput = /^(you|the|uh|um|so|and|but|okay|ok|yeah|yes|no|hmm|mm|thank you|thanks|thank you very much|you are welcome|thanks for listening|thanks for watching|thank you for watching|bye|goodbye|the end|please subscribe)$/;
+  const vagueTransitionOutput = /^(?:i am|i'm|we are|we're) going to (?:go to )?(?:the )?next (?:one|item)$/;
+  if (!normalized || genericSilenceOutput.test(normalized) || vagueTransitionOutput.test(normalized)) {
     throw new Error("VOICE_TRANSCRIPT_UNRELIABLE");
   }
   return transcript;

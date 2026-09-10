@@ -18,6 +18,8 @@ test("replaying a provider event has one effect", async () => {
 test("rejects empty and obvious silence hallucinations from voice transcription", () => {
   assert.throws(() => requireReliableTranscript("you"), /VOICE_TRANSCRIPT_UNRELIABLE/);
   assert.throws(() => requireReliableTranscript("Thank you."), /VOICE_TRANSCRIPT_UNRELIABLE/);
+  assert.throws(() => requireReliableTranscript("So,"), /VOICE_TRANSCRIPT_UNRELIABLE/);
+  assert.throws(() => requireReliableTranscript("I'm going to go to the next one."), /VOICE_TRANSCRIPT_UNRELIABLE/);
   assert.throws(() => requireReliableTranscript("   "), /VOICE_TRANSCRIPT_UNRELIABLE/);
   assert.equal(requireReliableTranscript("The entrance is tidy."), "The entrance is tidy.");
 });
