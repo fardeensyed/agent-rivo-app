@@ -202,7 +202,7 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 | A03 | Implemented | Text and voice contribute to one report. |
 | A04 | Implemented | Revised draft retains original source inputs and correction trail. |
 | A05 | Partial | Current-version approval, stale-version rejection, and final-state guard work; see limitations on a separate validated-report snapshot. |
-| A06 | Partial | Dashboard screens, real data, source timeline, report library, copy/print, store/state/search filters work; date-range filtering is not implemented. |
+| A06 | Implemented | Dashboard screens, real data, source timeline, report library, copy/print, and inclusive store/state/date/search filters work together. |
 | A07 | Implemented | Authorised users can inspect text, transcript, and private signed audio URL. |
 | A08 | Implemented | Procedure retrieval returns citations; unsupported questions return an honest no-answer response. |
 | A09 | Implemented | Store membership is enforced in chat, API routes, signed audio access, backend checks, and RLS. |
@@ -226,7 +226,6 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 
 ## Known limitations
 
-- The dashboard currently has store, state, and text filters, but not the handbook’s inclusive local-date range filter.
 - Validation makes the live visit read-only through the application workflow and saves validation metadata, but a new live validation does not yet populate the separate validated_reports snapshot table.
 - Silence protection combines audio-volume analysis and conservative transcript heuristics; it is not a full speech-activity model.
 - Corrections are deliberately conservative and request clarification for unusual or ambiguous wording.
@@ -238,4 +237,3 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 - Secret keys stay server-side. The browser uses only the Supabase publishable key.
 - Private audio is delivered through short-lived signed URLs after server-side authorisation.
 - Use development accounts and fictional data only.
-
