@@ -9,6 +9,7 @@ This repository is designed for the Agent Rivo assessment. It uses fictional dat
 - Real WhatsApp text collection and replies through Unipile.
 - Real incoming audio download, private Supabase Storage, Groq transcription, and a playable source timeline.
 - Mixed text/voice visit reporting, corrections, explicit draft approval, and report-version checks.
+- Semantic stale-draft checks are stable across Supabase `jsonb` field ordering; a correction creates one revised draft and validation approves that exact version without draft-number churn.
 - Procedure RAG over the supplied SOP corpus, with citations and an honest unsupported-answer path.
 - Supabase Auth, server-side scope enforcement, RLS, private audio URLs, and two seeded regional-manager identities.
 - React dashboard: overview, accessible stores, visit history, report library, detail timeline, copy, and browser print.
@@ -162,7 +163,7 @@ Open http://localhost:5173. Configure the Unipile webhook as:
 https://YOUR-NGROK-DOMAIN.ngrok-free.app/api/webhooks/whatsapp
 ~~~
 
-The backend verifies Unipile’s HMAC signature or the configured Unipile-Auth header. A synthetic identity-selecting event is accepted only by the isolated in-memory test runner, never by the Supabase-backed public webhook.
+Configure the custom `Unipile-Auth` header to match `UNIPILE_WEBHOOK_SECRET`. This is the verified integration path. The code also contains a timestamped HMAC verifier; its compatibility with a provider-supplied signature has not been established. A synthetic identity-selecting event is accepted only by the isolated in-memory test runner, never by the Supabase-backed public webhook.
 
 ## Models
 
@@ -187,6 +188,8 @@ npm run build --workspace frontend
 
 The core workflow suite covers corrections, stale approval, replay, store switching, silent audio, RAG separation, pending audio, and authorization. The adversarial audit suite adds checks for public webhook identity bypass, negative approval wording, concurrent replay, compound correction safety, persistence, scoped evidence, and failure retry.
 
+The latest local verification run passed **66/66 tests**: 34 core workflow tests and 32 release-audit tests. It also passed the backend/frontend TypeScript checks and both production builds. The live WhatsApp correction-to-validation flow was retested after restart: Draft 1 → correction → Draft 2 → validation of Draft 2, with no Draft 3 churn.
+
 ## Demo runbook
 
 1. Sign in as Anika and show the seeded dashboard.
@@ -194,6 +197,7 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 3. Send a fresh voice note and a text observation.
 4. Ask What should I record for an equipment incident? and show the cited SOP answer.
 5. Correct one factual observation, prepare the report, and explicitly validate the current draft.
+   If the correction is made after Draft 1, the response should show Draft 2 and validation should finalise Draft 2—not create Draft 3. A repeated approval should say the visit is already final.
 6. Refresh the dashboard. Open the visit, play the original audio, inspect the transcript and sources, then copy or print the validated report.
 7. Sign in as Noah. Show Lille-only dashboard scope and a forbidden response for an Anika/Lyon direct API or audio request.
 
@@ -201,18 +205,18 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 
 | ID | Status | Demo evidence |
 |---|---|---|
-| A01 | Implemented | Real Unipile text appears in the active visit. |
-| A02 | Implemented | Real phone recording is downloaded, transcribed, stored privately, and playable. |
+| A01 | Implemented; live integration evidence required | Real Unipile text appears in the active visit. |
+| A02 | Implemented; heuristic limitation | Real phone recording is downloaded, transcribed, stored privately, and playable. |
 | A03 | Implemented | Text and voice contribute to one report. |
-| A04 | Implemented | Revised draft retains original source inputs and correction trail. |
-| A05 | Implemented | Current-version approval, stale-version rejection, final-state guard, and an immutable validated_reports snapshot are written atomically after migration 005 is applied. |
+| A04 | Implemented for tested/common wording | Revised draft retains original source inputs and correction trail; unusual compound wording may require clarification. |
+| A05 | Implemented after migrations 005–006 | Current-version approval, stale-version rejection, final-state guard, and an immutable `validated_reports` snapshot are written atomically. |
 | A06 | Implemented | Dashboard screens, real data, source timeline, report library, copy/print, and inclusive store/state/date/search filters work together. |
-| A07 | Implemented | Authorised users can inspect text, transcript, and private signed audio URL. |
-| A08 | Implemented | Procedure retrieval returns citations; unsupported questions return an honest no-answer response. |
-| A09 | Implemented | Store membership is enforced in chat, API routes, signed audio access, backend checks, and RLS. |
-| A10 | Implemented | Visits/messages/drafts are persisted in Supabase and survive backend restart. |
-| A11 | Implemented | Provider message key is deduplicated in the database and guarded in-process. |
-| A12 | Implemented | Failed/silent audio is marked failed; no transcript or report fact is invented. |
+| A07 | Implemented with scoped access | Authorised users can inspect text, transcript, and private signed audio URL. |
+| A08 | Implemented; live adversarial retest recommended | Procedure retrieval returns citations; unsupported questions return an honest no-answer response. |
+| A09 | Implemented; requires rotated credentials and live Noah evidence | Store membership is enforced in chat, API routes, signed audio access, backend checks, and RLS. |
+| A10 | Implemented; live restart evidence recommended | Visits/messages/drafts are persisted in Supabase and survive backend restart. |
+| A11 | Implemented for the single-backend deployment model | Provider message keys are deduplicated in the database and guarded in-process. |
+| A12 | Implemented with heuristic audio protection | Failed/silent audio is marked failed; no transcript or report fact is intentionally invented. |
 | A13 | Implemented | An active visit must be cancelled before an explicit store switch; pending notes are scoped to the new visit only. |
 | A14 | Implemented | Environment template, migrations, seed, RAG ingestion, user mapping, and runnable checks are documented here. |
 
@@ -232,12 +236,17 @@ The core workflow suite covers corrections, stale approval, replay, store switch
 ## Known limitations
 
 - Voice protection combines peak/mean audio-volume analysis and conservative transcript heuristics; it is not a full speech-activity model with model confidence scores.
-- Corrections are deliberately conservative and request clarification for unusual or ambiguous wording.
+- Audio is limited to two minutes and 10 MB. Run exactly one backend process: startup marks interrupted pending audio as failed so the user can resend it without losing text notes. Multiple replicas require durable worker ownership and additional database concurrency checks.
+- Common quantity and quoted corrections are covered by tests. Unusual compound corrections are not universally supported; inspect the revised draft before approval.
+- Outbound WhatsApp replies have no durable retry queue. A reply delivery failure can require the user to request the draft again.
+- Dependency auditing currently reports advisories in the embedding dependency tree and `qs`. The API uses the simple query parser and does not process images with the embedding library; these mitigations are not equivalent to patched dependencies.
 - Photos/OCR, PDF generation, realtime subscriptions, hosted deployment, and additional languages are optional and intentionally out of scope. Browser copy/print provides the required export capability.
+
+See [the latest independent audit](docs/final-audit-2026-09-11.md) for verified results, remaining gaps, and the credential-rotation prerequisite before release.
 
 ## Security notes
 
-- .env and credential files are ignored by Git; .env.example contains placeholders only.
+- The current `.env` is ignored and current `.env.example` contains placeholders. The audit found a Unipile API key in historical `.env.example`; revoke that key and configure a replacement. Deleting a secret from the current file does not remove it from Git history.
 - Secret keys stay server-side. The browser uses only the Supabase publishable key.
 - Private audio is delivered through short-lived signed URLs after server-side authorisation.
 - Real Unipile events fail closed if the webhook secret, account ID, or sender ID is not configured. Configure APP_DASHBOARD_ORIGIN and VITE_API_URL explicitly for any non-local deployment.

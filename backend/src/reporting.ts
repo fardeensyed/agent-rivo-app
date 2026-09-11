@@ -44,6 +44,7 @@ function observationSentences(message: Message): string[] {
     const lower = sentence.toLowerCase()
       .replace(/^[\s'"“”‘’`]+|[\s'"“”‘’`.,!?]+$/g, "")
       .trim();
+    if (/^(?:do not|don't|dont|never)\s+(?:cancel|abandon|validate|approve)\b/.test(lower)) return false;
     const isCommand = /^(?:lyon|nantes|lille)$|^(?:start|starting|begin|beginning).*\bvisit\b|^(?:cancel|abandon).*\b(?:start|switch)\b|^(?:prepare|show|finish|end)\b.*\b(?:report|draft|visit)\b|^(?:review|check)\b.*\b(?:revised facts|draft|report)\b|^(?:finish|end|done|cancel|abandon)$|^(?:i\s+)?(?:validate|approve)\b|^(?:change|remove|replace|correct)\b/.test(lower);
     return sentence.length > 2 && !isCommand;
   });
@@ -99,9 +100,9 @@ function applyCorrection(observations: Observation[], message: Message): void {
       ? `${escapePattern(numericToken)}|${Object.entries(numberWords).find(([, value]) => value === numericToken)?.[0] ?? escapePattern(numericToken)}`
       : undefined;
   const expression = variants && numericUnit
-    ? new RegExp(`(?:${variants})\\s+${escapePattern(numericUnit)}`, "i")
-    : new RegExp(escapePattern(previous), "i");
-  const matches = observations.filter((candidate) => normalizeNumbers(candidate.text).includes(normalizeNumbers(previous)));
+    ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${variants})\\s+${escapePattern(numericUnit)}(?![\\p{L}\\p{N}])`, "iu")
+    : new RegExp(`(?<![\\p{L}\\p{N}])${escapePattern(previous)}(?![\\p{L}\\p{N}])`, "iu");
+  const matches = observations.filter((candidate) => expression.test(candidate.text));
   // A correction must identify one fact. Silently choosing the last of several
   // matches is not safe for a factual report.
   if (matches.length !== 1) return;
@@ -121,6 +122,7 @@ function categoryFor(text: string): Finding["category"] {
 
 function kindFor(text: string): Finding["kind"] {
   const lower = text.toLowerCase();
+  if (/\b(?:not|isn't|isn’t|aren't|aren’t)\s+(?:working|clean|tidy|up to date|correctly installed)\b|\b(?:does not|doesn't|doesn’t)\s+work\b/.test(lower)) return "issue";
   if (/tidy|clean|up to date|works|working|correctly installed/.test(lower)) return "positive";
   if (/missing|outdated|broken|damaged|not charg|does not|doesn't|absent|outside/.test(lower)) return "issue";
   return "neutral";
@@ -130,10 +132,12 @@ function isFollowUp(text: string): boolean {
   return /\b(should|please|ask|check .* with|by (monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i.test(text);
 }
 
-function resolveRelativeFollowUpDate(text: string, startedAt: string): string {
+function resolveRelativeFollowUpDate(text: string, startedAt: string, timezone: string): string {
   const weekdays: Record<string, number> = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
   return text.replace(/\bby (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i, (full, weekday: string) => {
-    const start = new Date(startedAt);
+    const parts = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(startedAt));
+    const part = (type: string) => parts.find(item => item.type === type)?.value;
+    const start = new Date(`${part("year")}-${part("month")}-${part("day")}T00:00:00Z`);
     const target = weekdays[weekday.toLowerCase()];
     if (!Number.isFinite(start.getTime()) || target === undefined) return full;
     let offset = (target - start.getUTCDay() + 7) % 7;
@@ -161,7 +165,7 @@ export function buildFactualDraft(visit: Visit, store: Store, messages: Message[
     text: item.text,
     sourceMessageIds: item.sourceMessageIds
   }));
-  const followUpNotes = observations.filter((item) => isFollowUp(item.text)).map((item) => ({ text: resolveRelativeFollowUpDate(item.text, visit.startedAt), sourceMessageIds: item.sourceMessageIds }));
+  const followUpNotes = observations.filter((item) => isFollowUp(item.text)).map((item) => ({ text: resolveRelativeFollowUpDate(item.text, messages.find(message => message.id === item.sourceMessageIds.at(-1))?.receivedAt ?? visit.startedAt, store.timezone), sourceMessageIds: item.sourceMessageIds }));
   const sourceMessageIds = Array.from(new Set([...findings.flatMap((finding) => finding.sourceMessageIds), ...followUpNotes.flatMap((note) => note.sourceMessageIds)]));
   const date = new Intl.DateTimeFormat("en-CA", { timeZone: store.timezone }).format(new Date(visit.startedAt));
   return {

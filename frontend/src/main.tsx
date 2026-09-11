@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
@@ -24,6 +24,8 @@ const localCalendarDate = (value: string, timezone: string) => {
 const selectedRangeLabel = (from: string, to: string) => from && to ? `${from} to ${to}` : from ? `From ${from}` : to ? `Until ${to}` : "All visit dates";
 
 function App() {
+  const identityEpoch = useRef(0);
+  const sessionIdentity = useRef<string | null>(null);
   const demoMode = import.meta.env.VITE_ENABLE_DEMO_MODE === "true";
   const [userId, setUserId] = useState("user_anika");
   const [session, setSession] = useState<Session | null>(); const [authError, setAuthError] = useState("");
@@ -31,12 +33,19 @@ function App() {
   const [page, setPage] = useState<Page>("overview"); const [selected, setSelected] = useState<VisitDetail>();
   const [storeFilter, setStoreFilter] = useState("all"); const [stateFilter, setStateFilter] = useState("all"); const [query, setQuery] = useState(""); const [fromDate, setFromDate] = useState(""); const [toDate, setToDate] = useState("");
   const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
-  const request = async <T,>(path: string): Promise<T> => { const headers: Record<string, string> = session ? { authorization: `Bearer ${session.access_token}` } : { "x-demo-user": userId }; const response = await fetch(`${API}${path}`, { headers }); const body = await response.json(); if (!response.ok) throw new Error(body.error ?? "Request failed"); return body as T; };
+  const request = async <T,>(path: string): Promise<T> => { const epoch = identityEpoch.current; const headers: Record<string, string> = session ? { authorization: `Bearer ${session.access_token}` } : { "x-demo-user": userId }; const response = await fetch(`${API}${path}`, { headers }); const body = await response.json(); if (epoch !== identityEpoch.current) throw new Error("Session changed. Please refresh."); if (!response.ok) throw new Error(body.error ?? "Request failed"); return body as T; };
   async function load() { setLoading(true); setError(""); try { const [nextUser, nextStores, nextVisits] = await Promise.all([request<User>("/me"), request<Store[]>("/stores"), request<Visit[]>("/visits")]); setUser(nextUser); setStores(nextStores); setVisits(nextVisits); setSelected(undefined); setAudioUrls({}); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load dashboard data."); } finally { setLoading(false); } }
   useEffect(() => {
     if (demoMode || !supabase) { setSession(null); return; }
     void supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      const nextIdentity = nextSession?.user.id ?? null;
+      if (sessionIdentity.current !== nextIdentity) {
+        sessionIdentity.current = nextIdentity; identityEpoch.current++;
+        setUser(undefined); setStores([]); setVisits([]); setSelected(undefined); setAudioUrls({});
+      }
+      setSession(nextSession);
+    });
     return () => listener.subscription.unsubscribe();
   }, [demoMode]);
   useEffect(() => { if (demoMode || session) void load(); }, [userId, session?.access_token, demoMode]);

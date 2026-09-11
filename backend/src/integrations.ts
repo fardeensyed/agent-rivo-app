@@ -39,6 +39,12 @@ export function requireReliableTranscript(value: string): string {
 const SILENT_AUDIO_MAX_DB = -55;
 const SILENT_AUDIO_MAX_MEAN_DB = -50;
 
+export function requireShortAudio(ffmpegOutput: string): void {
+  const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(ffmpegOutput);
+  if (!match) throw new Error("VOICE_AUDIO_DURATION_UNAVAILABLE");
+  if (Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) > 120) throw new Error("VOICE_NOTE_TOO_LONG");
+}
+
 export function audioAppearsSilent(ffmpegOutput: string): boolean {
   const readVolume = (label: "max" | "mean") => ffmpegOutput.match(new RegExp(label + "_volume:\\s*(-?(?:\\d+(?:\\.\\d+)?|inf)) dB", "i"))?.[1];
   const maximum = readVolume("max");
@@ -65,14 +71,16 @@ export async function requireAudibleAudio(audio: Buffer): Promise<void> {
     await writeFile(audioFile, audio);
     const output = await new Promise<string>((resolve, reject) => {
       const child = spawn(ffmpegPath, ["-hide_banner", "-i", audioFile, "-vn", "-af", "volumedetect", "-f", "null", "-"], {
-        stdio: ["ignore", "ignore", "pipe"]
+        stdio: ["ignore", "ignore", "pipe"], windowsHide: true
       });
+      const timer = setTimeout(() => { child.kill(); reject(new Error("VOICE_AUDIO_ANALYSIS_TIMEOUT")); }, 30000);
       let stderr = "";
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-      child.once("error", reject);
-      child.once("close", (code: number | null) => code === 0 ? resolve(stderr) : reject(new Error(`VOICE_AUDIO_ANALYSIS_FAILED:${code}`)));
+      child.once("error", error => { clearTimeout(timer); reject(error); });
+      child.once("close", (code: number | null) => { clearTimeout(timer); code === 0 ? resolve(stderr) : reject(new Error(`VOICE_AUDIO_ANALYSIS_FAILED:${code}`)); });
     });
+    requireShortAudio(output);
     if (audioAppearsSilent(output)) throw new Error("VOICE_NOTE_SILENT");
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -88,22 +96,35 @@ export async function transcribeAudio(audio: Buffer, filename = "voice-note.wav"
     model: config.groqSttModel,
     response_format: "json",
     temperature: 0
-  });
+  }, { timeout: 90000, maxRetries: 0 });
   return requireReliableTranscript(result.text);
 }
 
-const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const VOICE_BUCKET = "voice-notes";
 
 export async function downloadUnipileAttachment(messageId: string, attachmentId: string): Promise<{ bytes: Buffer; contentType: string }> {
   if (!config.unipileDsn || !config.unipileApiKey) throw new Error("UNIPILE_NOT_CONFIGURED");
   const response = await fetch(`https://${config.unipileDsn}/api/v1/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+    signal: AbortSignal.timeout(30000),
     headers: { "X-API-KEY": config.unipileApiKey, accept: "application/octet-stream" }
   });
   if (!response.ok) throw new Error(`UNIPILE_ATTACHMENT_DOWNLOAD_FAILED:${response.status}`);
   const declaredLength = Number(response.headers.get("content-length") ?? 0);
   if (declaredLength > MAX_AUDIO_BYTES) throw new Error("VOICE_NOTE_TOO_LARGE");
-  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!response.body) throw new Error("VOICE_NOTE_EMPTY");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = []; let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.length;
+      if (length > MAX_AUDIO_BYTES) { await reader.cancel(); throw new Error("VOICE_NOTE_TOO_LARGE"); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const bytes = Buffer.concat(chunks);
   if (!bytes.length) throw new Error("VOICE_NOTE_EMPTY");
   if (bytes.length > MAX_AUDIO_BYTES) throw new Error("VOICE_NOTE_TOO_LARGE");
   return { bytes, contentType: response.headers.get("content-type")?.split(";")[0] || "audio/ogg" };

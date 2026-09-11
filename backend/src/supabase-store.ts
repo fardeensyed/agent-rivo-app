@@ -7,6 +7,16 @@ type Row = Record<string, unknown>;
 export class SupabaseStore implements DataRepository {
   constructor(private readonly client: SupabaseClient) {}
 
+  // This prototype runs one backend process. At boot no prior audio worker is
+  // still alive; release interrupted placeholders so they cannot block a visit.
+  async recoverInterruptedAudio(): Promise<void> {
+    const { error } = await this.client.from("messages").update({
+      processing_status: "failed",
+      processing_error: "PROCESSING_INTERRUPTED: Please resend the voice note or send text."
+    }).eq("processing_status", "pending");
+    if (error) throw new Error("AUDIO_RECOVERY_FAILED:" + error.message);
+  }
+
   async getUser(id: string): Promise<User> {
     const { data, error } = await this.client.from("app_users").select("id,display_name,role").eq("id", id).single();
     if (error || !data) throw new Error("UNKNOWN_USER");

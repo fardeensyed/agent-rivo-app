@@ -33,14 +33,29 @@ function isAmbiguousCorrection(text: string): boolean {
 }
 
 function isApprovalIntent(text: string): boolean {
-  const value = text.trim().toLowerCase();
-  if (/\b(?:do not|don't|dont|not|never|without)\s+(?:validate|approve)\b/.test(value)) return false;
-  return /^(?:i\s+)?(?:validate|approve)\b/.test(value);
+  const value = text.trim().toLowerCase().replace(/^[\s'"“”‘’]+|[\s'"“”‘’.!]+$/g, "");
+  return /^(?:i\s+)?(?:validate|approve)\s+(?:(?:the\s+)?(?:latest|current)\s+(?:report|draft)|this\s+(?:report|draft)|(?:report\s+)?draft\s+(?:version\s+)?\d+)$/.test(value);
+}
+
+function isCancellationIntent(text: string): boolean {
+  return /^(?:please\s+)?(?:cancel|abandon)\b/i.test(text.trim());
 }
 
 function unchangedDraft(left: Visit["draft"], right: Visit["draft"]): boolean {
   if (!left || !right) return false;
-  return JSON.stringify({ findings: left.findings, followUpNotes: left.followUpNotes }) === JSON.stringify({ findings: right.findings, followUpNotes: right.followUpNotes });
+  const comparable = (draft: NonNullable<Visit["draft"]>) => ({
+    findings: draft.findings.map((finding) => ({
+      category: finding.category,
+      kind: finding.kind,
+      text: finding.text,
+      sourceMessageIds: [...finding.sourceMessageIds].sort()
+    })),
+    followUpNotes: draft.followUpNotes.map((note) => ({
+      text: note.text,
+      sourceMessageIds: [...note.sourceMessageIds].sort()
+    }))
+  });
+  return JSON.stringify(comparable(left)) === JSON.stringify(comparable(right));
 }
 
 function isAmbiguousDirectCorrection(text: string, visit: Visit): boolean {
@@ -53,6 +68,20 @@ function isAmbiguousDirectCorrection(text: string, visit: Visit): boolean {
 
 export class VisitWorkflow {
   private readonly providerLocks = new Map<string, Promise<void>>();
+  private readonly actorLocks = new Map<string, Promise<void>>();
+
+  async runForActor<T>(actorId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.actorLocks.get(actorId);
+    let release!: () => void;
+    const current = new Promise<void>(resolve => { release = resolve; });
+    this.actorLocks.set(actorId, current);
+    await previous;
+    try { return await work(); }
+    finally {
+      release();
+      if (this.actorLocks.get(actorId) === current) this.actorLocks.delete(actorId);
+    }
+  }
 
   constructor(
     private readonly db: DataRepository,
@@ -66,12 +95,16 @@ export class VisitWorkflow {
     const attachment = event.attachments?.[0];
     const providerKey = `${event.account_id}:${providerMessageId}`;
     if (attachment && !event.message) {
-      return this.ingestAudioPlaceholder({ providerKey, actorId, audioPath: attachment.url, receivedAt: event.timestamp });
+      return this.runForActor(actorId, () => this.ingestAudioPlaceholder({ providerKey, actorId, audioPath: attachment.url, receivedAt: event.timestamp }));
     }
     return this.ingestText({ providerKey, actorId, text: event.message ?? "", receivedAt: event.timestamp });
   }
 
   private async ingestAudioPlaceholder(input: { providerKey: string; actorId: string; audioPath?: string; receivedAt?: string }) {
+    return this.withProviderLock(input.providerKey, () => this.ingestAudioPlaceholderUnlocked(input));
+  }
+
+  private async ingestAudioPlaceholderUnlocked(input: { providerKey: string; actorId: string; audioPath?: string; receivedAt?: string }) {
     const existing = await this.db.getMessageByProviderKey(input.providerKey);
     if (existing) return { duplicate: true, message: existing, visit: existing.visitId ? await this.db.getVisit(existing.visitId) : undefined };
     const user = await this.db.getUser(input.actorId);
@@ -80,21 +113,31 @@ export class VisitWorkflow {
       id: randomUUID(), providerKey: input.providerKey, actorId: user.id, visitId: visit?.id,
       kind: "audio", audioPath: input.audioPath, processingStatus: "pending", receivedAt: input.receivedAt ?? new Date().toISOString()
     };
-    await this.db.insertMessage(message);
+    try { await this.db.insertMessage(message); }
+    catch (error) {
+      // A second backend process may win the unique provider-key insert.
+      const winner = await this.db.getMessageByProviderKey(input.providerKey);
+      if (winner) return { duplicate: true, message: winner, visit: winner.visitId ? await this.db.getVisit(winner.visitId) : undefined };
+      throw error;
+    }
     return { duplicate: false, message, visit };
   }
 
   async ingestText(input: { providerKey: string; actorId: string; text: string; receivedAt?: string }) {
-    const previous = this.providerLocks.get(input.providerKey);
+    return this.withProviderLock(input.providerKey, () => this.ingestTextUnlocked(input));
+  }
+
+  private async withProviderLock<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.providerLocks.get(key);
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
-    this.providerLocks.set(input.providerKey, current);
+    this.providerLocks.set(key, current);
     await previous;
     try {
-      return await this.ingestTextUnlocked(input);
+      return await work();
     } finally {
       release();
-      if (this.providerLocks.get(input.providerKey) === current) this.providerLocks.delete(input.providerKey);
+      if (this.providerLocks.get(key) === current) this.providerLocks.delete(key);
     }
   }
 
@@ -129,11 +172,28 @@ export class VisitWorkflow {
   }
 
   async handleIncomingText(input: { providerKey: string; actorId: string; text: string; receivedAt?: string }): Promise<ConversationOutcome> {
+    return this.runForActor(input.actorId, () => this.handleIncomingTextUnlocked(input));
+  }
+
+  private async handleIncomingTextUnlocked(input: { providerKey: string; actorId: string; text: string; receivedAt?: string }): Promise<ConversationOutcome> {
     try {
+      if (/\b(?:latest|last|previous)\b/i.test(input.text) && /\b(?:visit|report)\b/i.test(input.text) && !/\b(?:validate|approve|prepare|change|remove|cancel|start)\b/i.test(input.text)) {
+        if (await this.db.getMessageByProviderKey(input.providerKey)) return { duplicate: true };
+        const user = await this.db.getUser(input.actorId);
+        const store = (await this.db.getStores()).find(item => input.text.toLowerCase().includes(item.city.toLowerCase()));
+        if (!store) return { reply: "Which store's historical report would you like to read?" };
+        if (!canAccessStore(user, store.id)) return { reply: "You are not authorised to read reports for that store." };
+        const visit = (await this.db.getVisibleVisits(user)).filter(item => item.storeId === store.id && item.state === "validated").sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+        await this.db.insertMessage({ id: randomUUID(), actorId: user.id, providerKey: input.providerKey, kind: "procedural_question", text: input.text, processingStatus: "completed", receivedAt: input.receivedAt ?? new Date().toISOString() });
+        if (!visit?.draft) return { reply: `No validated report is available for ${store.name}.` };
+        return { reply: `Historical validated report — ${visit.draft.title}\nReport reference: ${visit.id}\n${visit.draft.summary}\n\n${visit.draft.findings.map(finding => `• ${finding.text}`).join("\n")}\n${visit.draft.followUpNotes.map(note => `• ${note.text}`).join("\n")}` };
+      }
       const ingested = await this.ingestText(input);
       if (ingested.duplicate) {
-        if (ingested.message.kind === "procedural_question") {
-          return { duplicate: true, visit: ingested.visit, reply: await this.answerProcedureQuestion(ingested.message.text ?? "") };
+        if (ingested.message.kind === "procedural_question" && ingested.message.processingStatus !== "completed") {
+          const reply = await this.answerProcedureQuestion(ingested.message.text ?? "");
+          await this.db.updateMessage({ ...ingested.message, processingStatus: "completed" });
+          return { duplicate: true, visit: ingested.visit, reply };
         }
         return { duplicate: true, visit: ingested.visit };
       }
@@ -143,11 +203,26 @@ export class VisitWorkflow {
       const visit = ingested.visit;
       const user = await this.db.getUser(input.actorId);
       const normalized = input.text.toLowerCase();
-      if (isProcedureQuestion(input.text)) return { visit, reply: await this.answerProcedureQuestion(input.text) };
-      if (!visit) return { reply: "Which authorised store are you visiting? Please choose Lyon or Nantes.", visit };
-      const switchesStore = /\b(?:cancel|abandon)\b.*\b(?:start|switch)\b/i.test(input.text);
+      if (isProcedureQuestion(input.text)) {
+        const reply = await this.answerProcedureQuestion(input.text);
+        await this.db.updateMessage({ ...ingested.message, processingStatus: "completed" });
+        return { visit, reply };
+      }
+      if (!visit) {
+        if (isApprovalIntent(input.text)) {
+          const finalVisit = (await this.db.getVisibleVisits(user))
+            .filter((item) => item.authorId === user.id && item.state === "validated")
+            .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+          if (finalVisit) {
+            const draftLabel = finalVisit.draft ? `Draft ${finalVisit.draft.version} cannot be changed.` : "The validated report cannot be changed.";
+            return { visit: finalVisit, reply: `This visit is already validated and final. ${draftLabel}` };
+          }
+        }
+        return { reply: "Which authorised store are you visiting? Please choose Lyon or Nantes.", visit };
+      }
+      const switchesStore = isCancellationIntent(input.text) && /\b(?:start|switch)\b/i.test(input.text);
       if (switchesStore) return { visit, reply: "The previous visit was cancelled and the new store visit was started. I attached the pending observation to this visit without carrying over the previous store’s notes." };
-      if (/\b(cancel|abandon)\b/.test(normalized)) {
+      if (isCancellationIntent(input.text)) {
         visit.state = "cancelled";
         await this.db.saveVisit(visit);
         return { visit, reply: "The visit was cancelled. You can start a new visit when ready." };
@@ -157,6 +232,7 @@ export class VisitWorkflow {
         return { visit: drafted, reply: this.formatDraft(drafted) };
       }
       if (/\b(?:validate|approve)\b/.test(normalized) && !isApprovalIntent(input.text)) {
+        await this.db.updateMessage({ ...ingested.message, kind: "validation" });
         return { visit, reply: "I only validate a report after a clear affirmative approval. Reply ‘I validate the latest draft’ when you are ready." };
       }
       if (isApprovalIntent(input.text)) {
@@ -200,6 +276,11 @@ export class VisitWorkflow {
       if (error instanceof Error && error.message === "PENDING_AUDIO_PROCESSING") {
         return { reply: "I am still transcribing a voice note for this visit. Please wait for the transcription before preparing or validating the report." };
       }
+      if (error instanceof Error && error.message === "STALE_DRAFT") {
+        const user = await this.db.getUser(input.actorId);
+        const visit = await this.db.getActiveVisit(user.id);
+        if (visit) return { visit, reply: `Accepted notes changed since the last draft. Please review this updated draft before approving.\n\n${this.formatDraft(await this.prepareCurrentDraft(user, visit.id))}` };
+      }
       throw error;
     }
   }
@@ -213,6 +294,10 @@ export class VisitWorkflow {
   }
 
   async completeAudioMessage(message: Message, transcript: string, audioPath: string): Promise<ConversationOutcome> {
+    return this.runForActor(message.actorId, () => this.completeAudioMessageUnlocked(message, transcript, audioPath));
+  }
+
+  private async completeAudioMessageUnlocked(message: Message, transcript: string, audioPath: string): Promise<ConversationOutcome> {
     const kind = isProcedureQuestion(transcript)
       ? "procedural_question"
       : isCorrectionInstruction(transcript)
@@ -281,13 +366,17 @@ export class VisitWorkflow {
     const messages = await this.db.getVisitMessages(visit.id);
     if (messages.some((message) => message.processingStatus === "pending")) throw new Error("PENDING_AUDIO_PROCESSING");
     const draft = buildFactualDraft(visit, store, messages);
+    if (visit.draft && unchangedDraft(visit.draft, draft)) return visit;
     return this.prepareDraft(user, visit.id, draft);
   }
 
   async validate(user: User, visitId: string, version: number, now = new Date().toISOString(), validationMessageId?: string) {
     const visit = await this.db.getVisit(visitId);
     if (!visit) throw new Error("NOT_FOUND");
-    if ((await this.db.getVisitMessages(visit.id)).some((message) => message.processingStatus === "pending")) throw new Error("PENDING_AUDIO_PROCESSING");
+    const messages = await this.db.getVisitMessages(visit.id);
+    if (messages.some((message) => message.processingStatus === "pending")) throw new Error("PENDING_AUDIO_PROCESSING");
+    const store = (await this.db.getStores()).find(item => item.id === visit.storeId);
+    if (store && visit.draft && !unchangedDraft(visit.draft, buildFactualDraft(visit, store, messages))) throw new Error("STALE_DRAFT");
     const validated = validateDraft(user, visit, version, now);
     await this.db.finalizeValidation(validated, validationMessageId);
     return validated;
@@ -295,7 +384,7 @@ export class VisitWorkflow {
 
   private async resolveVisitForInput(user: User, text: string, receivedAt?: string, existingVisitId?: string): Promise<Visit | undefined> {
     const stores = await this.db.getStores();
-    const switchesStore = /\b(?:cancel|abandon)\b.*\b(?:start|switch)\b/i.test(text);
+    const switchesStore = isCancellationIntent(text) && /\b(?:start|switch)\b/i.test(text);
     const switchTarget = switchesStore ? text.slice(Math.max(text.toLowerCase().lastIndexOf("start"), text.toLowerCase().lastIndexOf("switch"))) : text;
     const storeMatch = stores.find((store) => switchTarget.toLowerCase().includes(store.city.toLowerCase()));
     let visit = existingVisitId ? await this.db.getVisit(existingVisitId) : await this.db.getActiveVisit(user.id);

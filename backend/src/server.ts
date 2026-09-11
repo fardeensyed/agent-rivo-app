@@ -11,6 +11,8 @@ import { WebhookSignatureError, verifyUnipileAuthHeader, verifyUnipileSignature 
 import { canReadVisit } from "./domain.js";
 
 const app = express();
+// The API has no nested query parameters; avoid the qs parser entirely.
+app.set("query parser", "simple");
 const supabaseAdmin = createSupabaseAdmin();
 const db = supabaseAdmin ? new SupabaseStore(supabaseAdmin) : new MemoryStore();
 const procedureAssistant = supabaseAdmin ? new ProcedureAssistant(supabaseAdmin) : undefined;
@@ -154,7 +156,8 @@ app.post("/api/webhooks/whatsapp", async (request, response) => {
         await requireAudibleAudio(downloaded.bytes);
         const transcript = await transcribeAudio(downloaded.bytes, attachment.name ?? `voice-note.${extension}`);
         const completed = await workflow.completeAudioMessage(outcome.message, transcript, storagePath);
-        if (event.chat_id && completed.reply) await sendUnipileText(event.chat_id, completed.reply);
+        // Delivery failure must not erase an already accepted transcript/draft.
+        if (completed.reply) await replyIfPossible(event.chat_id, completed.reply);
         return response.status(202).json({ ...completed, message: { ...outcome.message, audioPath: storagePath, transcript, processingStatus: "completed" } });
       } catch (voiceError) {
         await workflow.failAudioMessage({ ...outcome.message, audioPath: storagePath ?? outcome.message.audioPath }, voiceError);
@@ -196,14 +199,19 @@ app.get("/api/messages/:messageId/audio-url", async (request, response) => {
 app.post("/api/visits/:visitId/validate", async (request, response) => {
   try {
     const version = z.object({ version: z.number().int().positive() }).parse(request.body).version;
-    return response.json(await workflow.validate(await actor(request), request.params.visitId, version));
+    const user = await actor(request);
+    return response.json(await workflow.runForActor(user.id, () => workflow.validate(user, request.params.visitId, version)));
   } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : "VALIDATION_FAILED" }); }
 });
 
 app.post("/api/visits/:visitId/draft", async (request, response) => {
-  try { return response.json(await workflow.prepareCurrentDraft(await actor(request), request.params.visitId)); }
+  try { const user = await actor(request); return response.json(await workflow.runForActor(user.id, () => workflow.prepareCurrentDraft(user, request.params.visitId))); }
   catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : "DRAFT_FAILED" }); }
 });
 
 const port = Number(process.env.PORT || 3001);
-app.listen(port, () => console.log(`Agent Rivo backend listening on http://localhost:${port}`));
+async function start() {
+  if (db instanceof SupabaseStore) await db.recoverInterruptedAudio();
+  app.listen(port, () => console.log(`Agent Rivo backend listening on http://localhost:${port}`));
+}
+void start().catch(error => { console.error("BACKEND_START_FAILED", error instanceof Error ? error.message : "UNKNOWN"); process.exitCode = 1; });

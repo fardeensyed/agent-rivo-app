@@ -371,6 +371,75 @@ test("does not reopen a validated visit and persists that final state", async ()
   await assert.rejects(() => workflow.prepareCurrentDraft(user, started.visit!.id), /VISIT_FINAL/);
 });
 
+test("does not create repeated drafts when validating an unchanged corrected draft", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const send = (providerKey: string, text: string) => workflow.handleIncomingText({ providerKey, actorId: "user_anika", text });
+
+  await send("repeat-validation-start", "Start a visit to Lyon.");
+  await send("repeat-validation-note", "The entrance is tidy.");
+  await send("repeat-validation-correction", "Change tidy to dirty.");
+  const prepared = await send("repeat-validation-prepare", "Prepare the report.");
+  assert.equal(prepared.visit?.draft?.version, 1);
+
+  const firstApproval = await send("repeat-validation-approval-1", "I validate the latest draft.");
+  assert.equal(firstApproval.visit?.state, "validated");
+  assert.equal(firstApproval.visit?.draft?.version, 1);
+
+  const replayWithNewProviderId = await send("repeat-validation-approval-2", "I validate the latest draft.");
+  assert.match(replayWithNewProviderId.reply ?? "", /already validated and final/i);
+  assert.equal(db.visits[0]?.state, "validated");
+  assert.equal(db.visits[0]?.draft?.version, 1);
+  assert.equal(db.validatedReports.length, 1);
+});
+
+test("does not treat persisted finding IDs or source ordering as new facts", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const send = (providerKey: string, text: string) => workflow.handleIncomingText({ providerKey, actorId: "user_anika", text });
+
+  await send("equivalent-draft-start", "Start Lyon.");
+  await send("equivalent-draft-note", "The entrance is tidy.");
+  const prepared = await send("equivalent-draft-prepare", "Prepare the report.");
+  const finding = prepared.visit!.draft!.findings[0]!;
+  // PostgreSQL jsonb may return keys in a different order than the original
+  // JavaScript object. This must not make an unchanged draft stale.
+  prepared.visit!.draft!.findings[0] = {
+    sourceMessageIds: [...finding.sourceMessageIds].reverse(),
+    text: finding.text,
+    kind: finding.kind,
+    category: finding.category,
+    id: "persisted-database-finding-id"
+  };
+  await db.saveVisit(prepared.visit!);
+
+  const approved = await send("equivalent-draft-approval", "I validate the latest draft.");
+  assert.equal(approved.visit?.state, "validated");
+  assert.equal(approved.visit?.draft?.version, 1);
+  assert.equal(db.validatedReports.length, 1);
+});
+
+test("validates the revised draft after a correction instead of creating another draft", async () => {
+  const db = new MemoryStore();
+  const workflow = new VisitWorkflow(db);
+  const send = (providerKey: string, text: string) => workflow.handleIncomingText({ providerKey, actorId: "user_anika", text });
+
+  await send("correction-after-draft-start", "Start Lyon.");
+  await send("correction-after-draft-note", "The entrance is tidy.");
+  const firstDraft = await send("correction-after-draft-prepare", "Prepare the report.");
+  assert.equal(firstDraft.visit?.draft?.version, 1);
+
+  const revised = await send("correction-after-draft-change", "Change tidy to messy.");
+  assert.equal(revised.visit?.draft?.version, 2);
+  assert.match(revised.reply ?? "", /created revised draft 2/i);
+
+  const approved = await send("correction-after-draft-approval", "I validate the latest draft.");
+  assert.equal(approved.visit?.state, "validated");
+  assert.equal(approved.visit?.draft?.version, 2);
+  assert.equal(db.validatedReports[0]?.version, 2);
+  assert.equal(db.validatedReports.length, 1);
+});
+
 test("creates one immutable snapshot for the exact WhatsApp-approved draft", async () => {
   const db = new MemoryStore();
   const workflow = new VisitWorkflow(db);
